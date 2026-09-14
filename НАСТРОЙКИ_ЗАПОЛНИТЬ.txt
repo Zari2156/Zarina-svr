@@ -1,0 +1,41 @@
+# ============================================================
+# ЗАПОЛНИТЕ ЭТОТ ФАЙЛ, ПОТОМ ПЕРЕИМЕНУЙТЕ ЕГО В ".env"
+# (без кавычек, просто .env — это последний шаг, после заполнения)
+# ============================================================
+
+# ==================== FACEBOOK ====================
+# Токен системного пользователя (Business Manager -> Настройки бизнеса -> Системные пользователи)
+FB_ACCESS_TOKEN=EAAWqZBdsCjbgBSbQwQLAA2d758hk0ARQ61Oef8ZAZCUvGQ4lQKYzLKsW8AQU8ZCOoZBBtNcOIhkJT8KoZB7IddW7Lqt9ZAsEi1hLPxBva8GYVF4FJBOBuayMM2nd5MGyJvk6SFpmLPDfR2vb0MvZBl3S7GIJ480KVevZBg4ZC0hFfZA8xOK55tahqrtxgrD9t4ypG1FdwZDZD
+# ID рекламного кабинета с префиксом act_
+FB_AD_ACCOUNT_ID=act_344624109813711
+FB_API_VERSION=v21.0
+# Период выгрузки по умолчанию: last_7d, last_30d, last_90d, this_month и т.д.
+FB_DATE_PRESET=last_30d
+
+# ==================== AMOCRM ====================
+AMO_SUBDOMAIN=qadam
+AMO_ACCESS_TOKEN=eyJ0eXAiOiJKV1QiLCJhbGciOiJSUzI1NiIsImp0aSI6ImVjYjFhZmQyYjBhMGYzMzkyZmRkOGZmZjIwNzIxMTg5YTVmYjRlZTY0NzFjOTE2ZmJmODE1NmEzZDRhYTM0OWUwM2IwZWQ5NzllNWYzY2ViIn0.eyJhdWQiOiI3ZDczMDE3NC00NTc5LTQ4NWEtODBmNS0xM2RkN2U0YzU5NjYiLCJqdGkiOiJlY2IxYWZkMmIwYTBmMzM5MmZkZDhmZmYyMDcyMTE4OWE1ZmI0ZWU2NDcxYzkxNmZiZjgxNTZhM2Q0YWEzNDllMDNiMGVkOTc5ZTVmM2NlYiIsImlhdCI6MTc4OTA0MDE1OCwibmJmIjoxNzg5MDQwMTU4LCJleHAiOjE5MTY5NTY4MDAsInN1YiI6IjIyNzU2MjEiLCJncmFudF90eXBlIjoiIiwiYWNjb3VudF9pZCI6MTg5NTA4NzIsImJhc2VfZG9tYWluIjoiYW1vY3JtLnJ1IiwidmVyc2lvbiI6Miwic2NvcGVzIjpbInB1c2hfbm90aWZpY2F0aW9ucyIsImZpbGVzIiwiY3JtIiwiZmlsZXNfZGVsZXRlIiwibm90aWZpY2F0aW9ucyJdLCJoYXNoX3V1aWQiOiJjNDVmNTA5NC1mYzVkLTRmMzItYTA5My03OWI5ODI1MmI4NjUiLCJhcGlfZG9tYWluIjoiYXBpLWIuYW1vY3JtLnJ1In0.qx27jGdFrYo6qOdJh5QC-_cjEkjrkKLlPwYrZfzXE3jyALAfjNVwhnUxErYLJDCAo4RwnbOgZCIfI4Irz9gYh2CEQ6aWuaDFUcfwQ5VzUeX1mD7GrZAFsuSUOKeQpL2Oxw9ct3lr5wPZhB590HYBX98vs3kh7tEHvI6bM6LVguIVSu0nRCC2PZnbHj5ALZYOxNLStTju9SxmSukdZNFQzZyDJ8NCr1rt5aC6rzeLtlx6FXBcp3loq0KLB4kageMOEuDmkfhYGX7Ziz4GOGunl8zQPseSLYhc-Jxs-QgViUNBwy-2GzWK41ybXvM4sMO3zDzeE9DkSYqjAAkJEYLDRg
+# Долгоживущий токен частной интеграции (Настройки -> Интеграции -> Создать интеграцию)
+AMO_ACCESS_TOKEN=
+
+# ID воронки продаж
+AMO_PIPELINE_ID=0
+# ID статуса "Квалификация пройдена"
+AMO_STATUS_QUALIFIED=0
+# ID статуса "Успешно реализовано" (узнать через GET /api/v4/leads/pipelines)
+AMO_STATUS_WON=142
+
+# ID кастомных полей сделки, куда Zapier пишет атрибуцию рекламы
+AMO_FIELD_CAMPAIGN_ID=0
+AMO_FIELD_ADSET_ID=0
+AMO_FIELD_AD_ID=0
+
+# ==================== СЕРВИС ====================
+PORT=3000
+# Включить автосинхронизацию по расписанию (каждый день в 00:00)
+RUN_CRON=true
+CRON_SCHEDULE=0 0 * * *
+
+# Пороги для рекомендаций (можно менять под свою экономику)
+REC_MIN_LEADS_FOR_DISABLE=10
+REC_MIN_ROAS_FOR_SCALE=3
