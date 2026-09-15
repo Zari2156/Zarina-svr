@@ -97,7 +97,54 @@ body {
 .btn--primary:hover { opacity: 0.9; }
 .btn:disabled { opacity: 0.5; cursor: default; }
 
-.layout { max-width: 1180px; margin: 0 auto; padding: 28px 32px 60px; }
+.segment-tabs {
+  max-width: 1180px;
+  margin: 0 auto;
+  padding: 18px 32px 0;
+  display: flex;
+  gap: 8px;
+}
+
+.segment-tab {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  color: var(--text-muted);
+  font-family: var(--font-head);
+  font-weight: 700;
+  font-size: 13px;
+  padding: 8px 18px;
+  border-radius: 8px;
+  cursor: pointer;
+}
+
+.segment-tab--active {
+  background: var(--brand);
+  color: #0B0E14;
+  border-color: var(--brand);
+}
+
+.content--secondary {
+  grid-template-columns: 1fr 1fr;
+  margin-top: 20px;
+}
+
+.mini-stats {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 12px;
+  padding: 18px;
+}
+
+.mini-stat {
+  background: var(--surface-2);
+  border-radius: 8px;
+  padding: 12px 14px;
+}
+
+.mini-stat__label { font-size: 12px; color: var(--text-muted); margin-bottom: 4px; }
+.mini-stat__value { font-family: var(--font-mono); font-size: 17px; font-weight: 600; }
+
+.layout { max-width: 1180px; margin: 0 auto; padding: 20px 32px 60px; }
 
 .totals {
   display: grid;

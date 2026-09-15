@@ -1,5 +1,12 @@
 const axios = require('axios');
 
+function classifyCampaignSegment(campaignName) {
+  const name = (campaignName || '').toUpperCase();
+  if (name.includes('НИШ') || name.includes('NISH')) return 'nish';
+  if (name.includes('ЕНТ') || name.includes('ENT')) return 'ent';
+  return null;
+}
+
 // Забирает данные из Facebook Insights ПО ДНЯМ (time_increment=1) за указанный диапазон,
 // чтобы потом можно было выбирать в интерфейсе любую дату или период.
 async function fetchFacebookInsights(since, until) {
@@ -44,12 +51,13 @@ async function fetchFacebookInsights(since, until) {
 
       rows.push({
         ad_id: row.ad_id,
-        date: row.date_start, // конкретный день этой строки
+        date: row.date_start,
         ad_name: row.ad_name,
         adset_id: row.adset_id,
         adset_name: row.adset_name,
         campaign_id: row.campaign_id,
         campaign_name: row.campaign_name,
+        segment: classifyCampaignSegment(row.campaign_name),
         spend,
         impressions: Number(row.impressions) || 0,
         reach: Number(row.reach) || 0,

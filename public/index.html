@@ -30,11 +30,14 @@
   </div>
 </header>
 
+<nav class="segment-tabs">
+  <button class="segment-tab segment-tab--active" data-segment="nish">НИШ</button>
+  <button class="segment-tab" data-segment="ent">ЕНТ</button>
+</nav>
+
 <main class="layout">
 
-  <section class="totals" id="totals">
-    <!-- карточки тотала рендерятся из app.js -->
-  </section>
+  <section class="totals" id="totals"></section>
 
   <section class="content">
     <div class="panel panel--table">
@@ -55,14 +58,8 @@
         <table id="adsTable">
           <thead>
             <tr>
-              <th>Объявление</th>
-              <th>Кампания</th>
-              <th>Расход</th>
-              <th>Лиды</th>
-              <th>CPL</th>
-              <th>Продажи</th>
-              <th>Выручка</th>
-              <th>ROAS</th>
+              <th>Объявление</th><th>Кампания</th><th>Расход</th><th>Лиды</th>
+              <th>CPL</th><th>Продажи</th><th>Выручка</th><th>ROAS</th>
             </tr>
           </thead>
           <tbody id="adsTableBody"></tbody>
@@ -71,17 +68,25 @@
     </div>
 
     <aside class="panel panel--assistant">
-      <div class="panel__head">
-        <h2>Маркетинг-ассистент</h2>
-      </div>
+      <div class="panel__head"><h2>Маркетинг-ассистент</h2></div>
       <div id="recommendations" class="rec-list"></div>
     </aside>
   </section>
 
-  <section class="panel panel--chart">
-    <div class="panel__head">
-      <h2>Расход и выручка по кампаниям</h2>
+  <section class="content content--secondary">
+    <div class="panel panel--ads-tags">
+      <div class="panel__head"><h2>С рекламы (по тегам)</h2></div>
+      <div id="adsTagsBlock" class="mini-stats"></div>
     </div>
+
+    <div class="panel panel--general">
+      <div class="panel__head"><h2>Общие продажи (все источники)</h2></div>
+      <div id="generalSalesBlock" class="mini-stats"></div>
+    </div>
+  </section>
+
+  <section class="panel panel--chart">
+    <div class="panel__head"><h2>Расход и выручка по кампаниям</h2></div>
     <canvas id="spendRevenueChart" height="90"></canvas>
   </section>
 
