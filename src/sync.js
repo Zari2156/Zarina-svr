@@ -109,7 +109,22 @@ function buildJoinedReport(since, until) {
   const nish = buildSegmentReport('nish', since, until, fbRows, amoLeads, sheetRows, adsTagsNish);
   const ent = buildSegmentReport('ent', since, until, fbRows, amoLeads, sheetRows, adsTagsEnt);
 
-  return { since, until, nish, ent, lastSync: db.getLastSync() };
+  // ВРЕМЕННАЯ ДИАГНОСТИКА: показывает, как распределились сделки/объявления по сегментам,
+  // чтобы понять, почему НИШ/ЕНТ могут быть пустыми.
+  const debug = {
+    totalAmoLeadsInRange: amoLeads.length,
+    amoNish: amoLeads.filter((l) => l.segment === 'nish').length,
+    amoEnt: amoLeads.filter((l) => l.segment === 'ent').length,
+    amoNoSegment: amoLeads.filter((l) => !l.segment).length,
+    sampleAmoLead: amoLeads[0] || null,
+    totalFbRowsInRange: fbRows.length,
+    fbNish: fbRows.filter((r) => r.segment === 'nish').length,
+    fbEnt: fbRows.filter((r) => r.segment === 'ent').length,
+    fbNoSegment: fbRows.filter((r) => !r.segment).length,
+    sampleFbRow: fbRows[0] || null,
+  };
+
+  return { since, until, nish, ent, lastSync: db.getLastSync(), debug };
 }
 
 module.exports = { runSync, buildJoinedReport };
