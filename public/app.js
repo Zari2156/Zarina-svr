@@ -1,6 +1,7 @@
 const fmt = (n, digits = 0) => (n === null || n === undefined || Number.isNaN(n))
   ? '—' : Number(n).toLocaleString('ru-RU', { maximumFractionDigits: digits, minimumFractionDigits: digits });
 const fmtRoas = (n) => (n === null || n === undefined) ? '—' : `${n.toFixed(1)}x`;
+const fmtPct = (n) => (n === null || n === undefined || Number.isNaN(n)) ? '—' : `${n.toFixed(1)}%`;
 
 let currentReport = null;
 let currentSegment = 'nish';
@@ -50,7 +51,11 @@ function renderTotals(t) {
     { label: 'Расход', value: fmt(t.spend) },
     { label: 'Лиды', value: fmt(t.leads) },
     { label: 'Средний CPL', value: fmt(t.cpl) },
+    { label: 'Квалы', value: fmt(t.qualified) },
+    { label: '% квалификации', value: fmtPct(t.percentQualified) },
+    { label: 'CPQL', value: fmt(t.cpql) },
     { label: 'Продажи', value: fmt(t.sales) },
+    { label: 'CAC', value: fmt(t.cac) },
     { label: 'Выручка', value: fmt(t.revenue) },
     { label: 'ROAS', value: fmtRoas(t.roas) },
   ];
@@ -67,7 +72,8 @@ function renderTable(rows) {
       <td class="name-cell">${r.ad_name || r.ad_id}<span class="campaign">${r.adset_name || ''}</span></td>
       <td class="name-cell">${r.campaign_name || '—'}</td>
       <td>${fmt(r.spend)}</td><td>${fmt(r.leads)}</td><td>${fmt(r.cpl)}</td>
-      <td>${fmt(r.sales)}</td><td>${fmt(r.revenue)}</td>
+      <td>${fmt(r.qualified)}</td><td>${fmt(r.cpql)}</td>
+      <td>${fmt(r.sales)}</td><td>${fmt(r.cac)}</td><td>${fmt(r.revenue)}</td>
       <td class="${(r.roas || 0) >= 1 ? 'roas-good' : 'roas-bad'}">${fmtRoas(r.roas)}</td>
     </tr>
   `).join('');
@@ -94,6 +100,7 @@ function renderAdsTagsBlock(block) {
   document.getElementById('adsTagsBlock').innerHTML = [
     { label: 'Лиды с рекламы (по тегам)', value: fmt(block.leads) },
     { label: 'Квалы', value: fmt(block.qualified) },
+    { label: '% квалификации', value: fmtPct(block.percentQualified) },
     { label: 'Продажи', value: fmt(block.sales) },
     { label: 'Выручка', value: fmt(block.revenue) },
   ].map(c => `<div class="mini-stat"><div class="mini-stat__label">${c.label}</div><div class="mini-stat__value">${c.value}</div></div>`).join('');
@@ -106,6 +113,7 @@ function renderGeneralSalesBlock(block) {
     { label: 'Новые договоры', value: fmt(block.new) },
     { label: 'Повторные продажи', value: fmt(block.repeat) },
     { label: 'Кол-во сделок', value: fmt(block.count) },
+    { label: 'Квал. лидов (весь сегмент)', value: fmt(block.qualified) },
   ].map(c => `<div class="mini-stat"><div class="mini-stat__label">${c.label}</div><div class="mini-stat__value">${c.value}</div></div>`).join('');
 }
 

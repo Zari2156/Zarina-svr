@@ -13,6 +13,7 @@ function classifySegment(klass, nishClasses, entClasses) {
   return null;
 }
 
+
 async function fetchAmoLeads(since, until) {
   const {
     AMO_SUBDOMAIN, AMO_ACCESS_TOKEN, AMO_PIPELINE_ID,
@@ -101,6 +102,116 @@ async function fetchAmoLeads(since, until) {
   return leads;
 }
 
+// Ищет в amoCRM сделки по конкретным ID (пачками, т.к. amoCRM ограничивает длину запроса)
+// и отдаёт только теги — этого достаточно, чтобы понять, пришла ли сделка "с рекламы".
+// В отличие от fetchAmoLeads, НЕ ограничена датой создания сделки — нужна сделка любого возраста,
+// если оплата по ней (из Google Таблицы) попала в выбранный период.
+async function fetchAmoLeadsByIds(ids) {
+  const { AMO_SUBDOMAIN, AMO_ACCESS_TOKEN } = process.env;
+  if (!AMO_SUBDOMAIN || !AMO_ACCESS_TOKEN) {
+    throw new Error('AMO_SUBDOMAIN или AMO_ACCESS_TOKEN не заданы в .env');
+  }
+
+  const uniqueIds = [...new Set((ids || []).map((id) => String(id).trim()).filter(Boolean))];
+  const result = {}; // { [leadId]: ['tag1', 'tag2', ...] }
+  if (uniqueIds.length === 0) return result;
+
+  const batchSize = 50; // безопасный размер пачки для длины URL
+  for (let i = 0; i < uniqueIds.length; i += batchSize) {
+    const batch = uniqueIds.slice(i, i + batchSize);
+    const params = new URLSearchParams();
+    batch.forEach((id) => params.append('filter[id][]', id));
+    params.append('with', 'tags');
+    params.append('limit', String(batchSize));
+
+    const url = `https://${AMO_SUBDOMAIN}.amocrm.ru/api/v4/leads?${params.toString()}`;
+    const resp = await axios.get(url, {
+      headers: { Authorization: `Bearer ${AMO_ACCESS_TOKEN}` },
+      validateStatus: () => true,
+    });
+
+    if (resp.status === 204) continue; // ни одна сделка из пачки не найдена — не ошибка
+    if (resp.status >= 400) {
+      // Не роняем весь синк из-за одной проблемной пачки ID — просто логируем и идём дальше
+      console.error(`[amoClient] fetchAmoLeadsByIds: ошибка ${resp.status} на пачке ${i}-${i + batch.length}`);
+      continue;
+    }
+
+    const pageLeads = (resp.data._embedded && resp.data._embedded.leads) || [];
+    for (const lead of pageLeads) {
+      const tagNames = ((lead._embedded && lead._embedded.tags) || []).map((t) => t.name);
+      result[String(lead.id)] = tagNames;
+    }
+  }
+
+  return result;
+}
+
+// Ищет в истории событий amoCRM, КОГДА каждая сделка впервые попала на нужный статус
+// (например, "Квалификация пройдена") — а не когда она была создана и не какой у неё статус
+// сейчас. Это нужно, чтобы правильно относить сделку к периоду отчёта: сделка могла быть
+// создана 1 сентября, а квалифицирована только 9-го — и должна попасть именно в период,
+// где стоит 9 сентября, а не 1-е.
+async function fetchStatusChangeDates(leadIds, statusId) {
+  const { AMO_SUBDOMAIN, AMO_ACCESS_TOKEN } = process.env;
+  const result = {}; // { [leadId]: unix-время САМОГО РАННЕГО перехода на этот статус }
+  if (!AMO_SUBDOMAIN || !AMO_ACCESS_TOKEN || !statusId) return result;
+
+  const uniqueIds = [...new Set((leadIds || []).map((id) => String(id).trim()).filter(Boolean))];
+  if (uniqueIds.length === 0) return result;
+
+  const batchSize = 50; // безопасный размер пачки для длины URL
+  for (let i = 0; i < uniqueIds.length; i += batchSize) {
+    const batch = uniqueIds.slice(i, i + batchSize);
+    let page = 1;
+    const limit = 250;
+
+    while (true) {
+      const params = new URLSearchParams();
+      params.append('filter[type][]', 'lead_status_changed');
+      params.append('filter[entity]', 'lead');
+      batch.forEach((id) => params.append('filter[entity_id][]', id));
+      params.append('page', String(page));
+      params.append('limit', String(limit));
+
+      const url = `https://${AMO_SUBDOMAIN}.amocrm.ru/api/v4/events?${params.toString()}`;
+      const resp = await axios.get(url, {
+        headers: { Authorization: `Bearer ${AMO_ACCESS_TOKEN}` },
+        validateStatus: () => true,
+      });
+
+      if (resp.status === 204) break; // на этой пачке событий больше нет
+      if (resp.status >= 400) {
+        console.error(`[amoClient] fetchStatusChangeDates: ошибка ${resp.status} (пачка ${i}, стр. ${page})`);
+        break; // не роняем весь синк из-за одной пачки — просто эти ID останутся без qualified_at
+      }
+
+      const events = (resp.data._embedded && resp.data._embedded.events) || [];
+      if (events.length === 0) break;
+
+      for (const ev of events) {
+        const after = (ev.value_after && ev.value_after[0]) || {};
+        // amoCRM отдаёт статус то как value_after[0].lead_status.id, то (в старых версиях) как status_id —
+        // проверяем оба варианта, чтобы не потерять совпадение из-за формата ответа.
+        const afterStatusId = (after.lead_status && after.lead_status.id) || after.status_id || null;
+        if (afterStatusId === null || String(afterStatusId) !== String(statusId)) continue;
+
+        const leadId = String(ev.entity_id);
+        const ts = ev.created_at;
+        if (!result[leadId] || ts < result[leadId]) {
+          result[leadId] = ts; // запоминаем САМЫЙ РАННИЙ переход, если сделка попадала на статус несколько раз
+        }
+      }
+
+      if (events.length < limit) break; // последняя страница для этой пачки ID
+      page++;
+      if (page > 20) break; // защита от бесконечного цикла на случай неожиданного ответа API
+    }
+  }
+
+  return result;
+}
+
 async function fetchAmoMeta() {
   const { AMO_SUBDOMAIN, AMO_ACCESS_TOKEN } = process.env;
   const headers = { Authorization: `Bearer ${AMO_ACCESS_TOKEN}` };
@@ -113,4 +224,4 @@ async function fetchAmoMeta() {
   return { fields: fields.data, pipelines: pipelines.data };
 }
 
-module.exports = { fetchAmoLeads, fetchAmoMeta };
+module.exports = { fetchAmoLeads, fetchAmoLeadsByIds, fetchStatusChangeDates, fetchAmoMeta };
