@@ -124,7 +124,7 @@ body {
 }
 
 .content--secondary {
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: 1fr;
   margin-top: 20px;
 }
 

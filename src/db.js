@@ -36,6 +36,9 @@ CREATE TABLE IF NOT EXISTS amo_leads (
   campaign_id TEXT,
   adset_id TEXT,
   ad_id TEXT,
+  fb_campaign_name TEXT,
+  fb_adset_name TEXT,
+  fb_ad_name TEXT,
   klass TEXT,
   segment TEXT,
   department TEXT,
@@ -86,6 +89,13 @@ try {
 } catch (e) {
   // колонка уже есть — это нормально, ничего не делаем
 }
+try {
+  db.exec(`ALTER TABLE amo_leads ADD COLUMN fb_campaign_name TEXT`);
+  db.exec(`ALTER TABLE amo_leads ADD COLUMN fb_adset_name TEXT`);
+  db.exec(`ALTER TABLE amo_leads ADD COLUMN fb_ad_name TEXT`);
+} catch (e) {
+  // колонки уже есть — это нормально, ничего не делаем
+}
 
 function upsertFbInsights(rows) {
   const stmt = db.prepare(`
@@ -107,18 +117,23 @@ function upsertFbInsights(rows) {
 function upsertAmoLeads(leads) {
   const stmt = db.prepare(`
     INSERT INTO amo_leads (id, name, price, status_id, created_at, closed_at, campaign_id, adset_id, ad_id,
+      fb_campaign_name, fb_adset_name, fb_ad_name,
       klass, segment, department, tags, is_qualified, is_success, is_full_payment, qualified_at, synced_at)
     VALUES (@id, @name, @price, @status_id, @created_at, @closed_at, @campaign_id, @adset_id, @ad_id,
+      @fb_campaign_name, @fb_adset_name, @fb_ad_name,
       @klass, @segment, @department, @tags, @is_qualified, @is_success, @is_full_payment, @qualified_at, @synced_at)
     ON CONFLICT(id) DO UPDATE SET
       name=excluded.name, price=excluded.price, status_id=excluded.status_id,
       created_at=excluded.created_at, closed_at=excluded.closed_at,
       campaign_id=excluded.campaign_id, adset_id=excluded.adset_id, ad_id=excluded.ad_id,
+      fb_campaign_name=excluded.fb_campaign_name, fb_adset_name=excluded.fb_adset_name, fb_ad_name=excluded.fb_ad_name,
       klass=excluded.klass, segment=excluded.segment, department=excluded.department, tags=excluded.tags,
       is_qualified=excluded.is_qualified, is_success=excluded.is_success, is_full_payment=excluded.is_full_payment,
       qualified_at=excluded.qualified_at, synced_at=excluded.synced_at
   `);
-  const insertMany = db.transaction((items) => { for (const item of items) stmt.run({ qualified_at: null, ...item }); });
+  const insertMany = db.transaction((items) => {
+    for (const item of items) stmt.run({ qualified_at: null, fb_campaign_name: null, fb_adset_name: null, fb_ad_name: null, ...item });
+  });
   insertMany(leads);
 }
 

@@ -19,6 +19,7 @@ async function fetchAmoLeads(since, until) {
     AMO_SUBDOMAIN, AMO_ACCESS_TOKEN, AMO_PIPELINE_ID,
     AMO_STATUS_QUALIFIED, AMO_STATUS_SUCCESS, AMO_STATUS_FULL_PAYMENT, AMO_STATUS_WON,
     AMO_FIELD_CAMPAIGN_ID, AMO_FIELD_ADSET_ID, AMO_FIELD_AD_ID, AMO_FIELD_CLASS, AMO_FIELD_DEPARTMENT,
+    AMO_FIELD_FB_CAMPAIGN_NAME, AMO_FIELD_FB_ADSET_NAME, AMO_FIELD_FB_AD_NAME,
     NISH_CLASSES, ENT_CLASSES,
   } = process.env;
 
@@ -85,6 +86,12 @@ async function fetchAmoLeads(since, until) {
         campaign_id: getField(lead, AMO_FIELD_CAMPAIGN_ID),
         adset_id: getField(lead, AMO_FIELD_ADSET_ID),
         ad_id: getField(lead, AMO_FIELD_AD_ID),
+        // Названия кампании/группы объявлений/объявления, которые приходят в amoCRM через
+        // интеграцию (Zapier) из Facebook — используются для сопоставления с рекламным кабинетом,
+        // т.к. числовой ad_id часто не заполняется, а название — надёжный источник совпадения.
+        fb_campaign_name: getField(lead, AMO_FIELD_FB_CAMPAIGN_NAME),
+        fb_adset_name: getField(lead, AMO_FIELD_FB_ADSET_NAME),
+        fb_ad_name: getField(lead, AMO_FIELD_FB_AD_NAME),
         klass,
         segment: classifySegment(klass, nishClasses, entClasses),
         department: getField(lead, AMO_FIELD_DEPARTMENT),
@@ -217,11 +224,23 @@ async function fetchAmoMeta() {
   const headers = { Authorization: `Bearer ${AMO_ACCESS_TOKEN}` };
 
   const [fields, pipelines] = await Promise.all([
-    axios.get(`https://${AMO_SUBDOMAIN}.amocrm.ru/api/v4/leads/custom_fields`, { headers, validateStatus: () => true }),
+    axios.get(`https://${AMO_SUBDOMAIN}.amocrm.ru/api/v4/leads/custom_fields?limit=250`, { headers, validateStatus: () => true }),
     axios.get(`https://${AMO_SUBDOMAIN}.amocrm.ru/api/v4/leads/pipelines`, { headers, validateStatus: () => true }),
   ]);
 
-  return { fields: fields.data, pipelines: pipelines.data };
+  // Простой читаемый список полей: ID + название + код — чтобы не искать вручную по интерфейсу amoCRM.
+  const fieldsList = ((fields.data._embedded && fields.data._embedded.custom_fields) || [])
+    .map((f) => ({ id: f.id, name: f.name, code: f.code, type: f.type_id }))
+    .sort((a, b) => a.name.localeCompare(b.name, 'ru'));
+
+  // Простой список воронок и статусов внутри них — с ID, чтобы находить AMO_STATUS_* без гадания.
+  const pipelinesList = ((pipelines.data._embedded && pipelines.data._embedded.pipelines) || []).map((p) => ({
+    id: p.id,
+    name: p.name,
+    statuses: ((p._embedded && p._embedded.statuses) || []).map((s) => ({ id: s.id, name: s.name, sort: s.sort, type: s.type })),
+  }));
+
+  return { fieldsList, pipelinesList, raw: { fields: fields.data, pipelines: pipelines.data } };
 }
 
 module.exports = { fetchAmoLeads, fetchAmoLeadsByIds, fetchStatusChangeDates, fetchAmoMeta };

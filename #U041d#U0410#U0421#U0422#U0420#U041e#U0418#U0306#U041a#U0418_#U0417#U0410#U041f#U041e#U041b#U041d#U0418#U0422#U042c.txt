@@ -31,6 +31,15 @@ AMO_FIELD_CLASS=0
 # ID кастомного поля "Отдел" -- сервис учитывает только сделки со значением "Online"
 AMO_FIELD_DEPARTMENT=0
 
+# ID полей с названиями кампании/группы объявлений/объявления, которые приходят в amoCRM
+# через интеграцию (Zapier) из Facebook -- по ним сопоставляем сделки с рекламным кабинетом
+# (надёжнее, чем по числовому ad_id, который часто не заполняется). Названия полей в amoCRM:
+# FB_CAMPAIGN_NAME, FB_ADSET_NAME, FB_AD_NAME -- их ID можно посмотреть на странице
+# /api/amo-meta вашего сервиса после деплоя (там же можно найти вообще любой ID поля/статуса).
+AMO_FIELD_FB_CAMPAIGN_NAME=0
+AMO_FIELD_FB_ADSET_NAME=0
+AMO_FIELD_FB_AD_NAME=0
+
 # ID кастомных полей сделки, куда Zapier пишет атрибуцию рекламы
 AMO_FIELD_CAMPAIGN_ID=0
 AMO_FIELD_ADSET_ID=0

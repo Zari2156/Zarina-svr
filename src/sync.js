@@ -29,6 +29,13 @@ async function markAdsPayments(sheetRows) {
   });
 }
 
+// Приводит название к единому виду для сравнения: убирает разницу в регистре, лишние пробелы
+// по краям и схлопывает несколько пробелов внутри в один — чтобы "Ниш Каз 4кл " и "ниш каз  4кл"
+// считались одним и тем же объявлением.
+function normalizeName(str) {
+  return (str || '').toString().trim().toLowerCase().replace(/\s+/g, ' ');
+}
+
 function defaultRangeIfMissing(since, until) {
   if (since && until) return { since, until };
   const today = new Date();
@@ -70,18 +77,27 @@ async function runSync(sinceIn, untilIn) {
 
 // Строит один сегмент (НИШ или ЕНТ): джойн Facebook+amoCRM по ad_id + блок "с рекламы" по тегам
 // + общие продажи из Google Таблицы.
-// "Лид" — сделка СОЗДАНА в выбранном периоде. "Квал" — на момент синхронизации сделка ДОШЛА
-// до статуса "Квалификация пройдена" или дальше по воронке (is_qualified уже учитывает это —
-// см. amoClient.js: fetchQualifiedOrLaterStatusIds), даже если сейчас стоит на более позднем этапе.
+// "Лид" — сделка СОЗДАНА в выбранном периоде. "Квал" — на момент синхронизации текущий статус
+// сделки равен статусу "Квалификация пройдена" (AMO_STATUS_QUALIFIED) — сделки в этой воронке
+// с этого статуса дальше не переходят, поэтому текущего статуса достаточно.
 function buildSegmentReport(segment, since, until, fbRows, amoLeads, sheetRows, adsTags) {
   const fbSeg = fbRows.filter((r) => r.segment === segment);
   const amoSeg = amoLeads.filter((r) => r.segment === segment);
   const sheetSeg = sheetRows.filter((r) => r.segment === segment);
 
-  // --- Джойн по объявлениям (детализация по каждому креативу — требует привязки ad_id) ---
+  // --- Джойн по объявлениям (детализация по каждому креативу) ---
   const rows = fbSeg.map((fb) => {
-    const related = amoSeg.filter((l) => String(l.ad_id) === String(fb.ad_id));
-    const leads = related.length;
+    const fbAdNameNorm = normalizeName(fb.ad_name);
+    // Сопоставление с amoCRM нужно ТОЛЬКО для квалов/продаж (Facebook не знает о квалификации) —
+    // сначала пробуем по ad_id (если он вообще у кого-то заполнен), иначе по названию объявления
+    // (FB_AD_NAME из amoCRM, приходит через Zapier-интеграцию с Facebook).
+    let related = amoSeg.filter((l) => l.ad_id && String(l.ad_id) === String(fb.ad_id));
+    if (related.length === 0 && fbAdNameNorm) {
+      related = amoSeg.filter((l) => l.fb_ad_name && normalizeName(l.fb_ad_name) === fbAdNameNorm);
+    }
+    // "Лиды" на объявление — берём НЕ из amoCRM (связка может быть неполной), а готовой цифрой
+    // прямо из Facebook (fb_leads) — там это уже посчитано точно средствами самого Facebook.
+    const leads = fb.fb_leads || 0;
     const qualified = related.filter((l) => l.is_qualified).length;
     // Продажи/выручка по объявлению — пока всё ещё по текущему статусу amoCRM (is_success/is_full_payment).
     // ВАЖНО: в отличие от adsBlock ниже, эта детализация по объявлениям ещё НЕ переведена на
@@ -107,33 +123,16 @@ function buildSegmentReport(segment, since, until, fbRows, amoLeads, sheetRows, 
     };
   });
 
-  // Итоги сегмента считаем НЕ суммой строк-объявлений (это зависит от привязки к ad_id, которая
-  // есть не у всех сделок), а по ВСЕМ сделкам сегмента за период — так totals.leads/qualified
-  // остаются верными, даже если у части сделок нет привязки к конкретному креативу.
-  const totalSpend = fbSeg.reduce((sum, r) => sum + r.spend, 0);
-  const totalQualified = amoSeg.filter((l) => l.is_qualified).length;
-  const totals = {
-    spend: totalSpend,
-    leads: amoSeg.length,
-    qualified: totalQualified,
-    sales: rows.reduce((sum, r) => sum + r.sales, 0),
-    revenue: rows.reduce((sum, r) => sum + r.revenue, 0),
-  };
-  totals.cpl = totals.leads > 0 ? totals.spend / totals.leads : null;
-  totals.cpql = totals.qualified > 0 ? totals.spend / totals.qualified : null;
-  totals.cac = totals.sales > 0 ? totals.spend / totals.sales : null;
-  totals.percentQualified = totals.leads > 0 ? (totals.qualified / totals.leads) * 100 : null;
-  totals.roas = totals.spend > 0 ? totals.revenue / totals.spend : null;
-
-  // --- Блок "С рекламы" ---
+  // --- Блок "С рекламы" (считаем ДО totals, т.к. totals берёт из него продажи/выручку) ---
   const adsLeads = amoSeg.filter((l) => {
     const tags = (l.tags || '').split(',').map((t) => t.trim());
     return tags.some((t) => adsTags.includes(t));
   });
   const adsQualifiedCount = adsLeads.filter((l) => l.is_qualified).length;
   // sales / revenue — деньги: берём НЕ из поля "Бюджет" amoCRM (оно меняется по ходу сделки и
-  // не хранит историю), а из фактических платежей в Google Таблице, помеченных при синке
-  // (markAdsPayments) как "с рекламы" — по совпадению ID сделки + рекламный тег.
+  // не хранит историю) и НЕ из джойна по ad_id (он работает только если сделке проставлен ID
+  // объявления — а это есть не всегда), а из фактических платежей в Google Таблице, помеченных
+  // при синке (markAdsPayments) как "с рекламы" — по совпадению ID сделки + рекламный тег.
   const adsPayments = sheetSeg.filter((r) => r.is_from_ads);
   const adsBlock = {
     leads: adsLeads.length,
@@ -142,6 +141,24 @@ function buildSegmentReport(segment, since, until, fbRows, amoLeads, sheetRows, 
     sales: adsPayments.length,
     revenue: adsPayments.reduce((sum, r) => sum + r.amount, 0),
   };
+
+  // Итоги сегмента: leads/qualified — по ВСЕМ сделкам сегмента за период (не зависит от ad_id).
+  // sales/revenue — из adsBlock (надёжный источник, см. выше), а НЕ суммой строк-объявлений —
+  // та сумма верна только если у сделок стоит ad_id, что бывает не всегда.
+  const totalSpend = fbSeg.reduce((sum, r) => sum + r.spend, 0);
+  const totalQualified = amoSeg.filter((l) => l.is_qualified).length;
+  const totals = {
+    spend: totalSpend,
+    leads: amoSeg.length,
+    qualified: totalQualified,
+    sales: adsBlock.sales,
+    revenue: adsBlock.revenue,
+  };
+  totals.cpl = totals.leads > 0 ? totals.spend / totals.leads : null;
+  totals.cpql = totals.qualified > 0 ? totals.spend / totals.qualified : null;
+  totals.cac = totals.sales > 0 ? totals.spend / totals.sales : null;
+  totals.percentQualified = totals.leads > 0 ? (totals.qualified / totals.leads) * 100 : null;
+  totals.roas = totals.spend > 0 ? totals.revenue / totals.spend : null;
 
   // --- Общие продажи (все источники, из Google Таблицы) ---
   // Квал. лиды тут — НЕ из таблицы (там их нет), а широким фильтром по amoCRM: весь сегмент
