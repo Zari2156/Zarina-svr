@@ -12,16 +12,27 @@ function getAdsTags() {
 }
 
 // Помечает у каждого НОВОГО платежа (is_new=1) из Google Таблицы, пришёл ли он "с рекламы":
-// ищет сделку с таким же ID в amoCRM (независимо от даты создания сделки) и проверяет,
-// есть ли у неё тег из списка рекламных тегов её сегмента (НИШ/ЕНТ).
-// Повторные продажи и доплаты (is_new=0) в "С рекламы" никогда не попадают — так решили.
-async function markAdsPayments(sheetRows) {
+// ищет сделку с таким же ID в amoCRM и проверяет тег + название объявления.
+// ВАЖНО: проверяем по amoCRM только платежи ИЗ ТЕКУЩЕГО ПЕРИОДА синхронизации (since..until),
+// а не всю историю таблицы — иначе с каждым синком число запросов к amoCRM растёт бесконечно
+// и синхронизация может не укладываться по времени.
+async function markAdsPayments(sheetRows, since, until) {
   const adsTags = getAdsTags();
-  const idsToCheck = sheetRows.filter((r) => r.is_new).map((r) => r.id);
+  const inPeriod = (r) => r.date >= since && r.date <= until;
+  const idsToCheck = sheetRows.filter((r) => r.is_new && inPeriod(r)).map((r) => r.id);
   const leadInfoById = await fetchAmoLeadsByIds(idsToCheck); // { [id]: { tags, ad_name } }
+
+  // Для платежей ВНЕ текущего периода — подтягиваем уже посчитанное раньше значение,
+  // а не сбрасываем в 0 (иначе с каждым синком терялись бы старые "с рекламы"-платежи).
+  const outOfPeriodIds = sheetRows.filter((r) => r.is_new && !inPeriod(r)).map((r) => r.id);
+  const previousFlags = db.getAdsFlagsByIds(outOfPeriodIds);
 
   return sheetRows.map((r) => {
     if (!r.is_new) return { ...r, is_from_ads: 0, ad_name: null };
+    if (!inPeriod(r)) {
+      const prev = previousFlags[String(r.id)];
+      return prev ? { ...r, is_from_ads: prev.is_from_ads, ad_name: prev.ad_name } : { ...r, is_from_ads: 0, ad_name: null };
+    }
     const info = leadInfoById[String(r.id)] || { tags: [], ad_name: null };
     const relevantTags = r.segment === 'nish' ? adsTags.nish : r.segment === 'ent' ? adsTags.ent : [];
     const matched = relevantTags.length > 0 && info.tags.some((t) => relevantTags.includes(t));
@@ -59,7 +70,7 @@ async function runSync(sinceIn, untilIn) {
 
     // Для каждого нового платежа из таблицы проверяем в amoCRM по ID, есть ли рекламный тег —
     // это отдельный запрос к amoCRM (по ID, не по дате создания сделки), делаем один раз тут при синке.
-    const sheetRows = await markAdsPayments(sheetRowsRaw);
+    const sheetRows = await markAdsPayments(sheetRowsRaw, since, until);
 
     db.upsertFbInsights(fbRows);
     db.upsertAmoLeads(amoLeads);
@@ -99,13 +110,11 @@ function buildSegmentReport(segment, since, until, fbRows, amoLeads, sheetRows, 
     // прямо из Facebook (fb_leads) — там это уже посчитано точно средствами самого Facebook.
     const leads = fb.fb_leads || 0;
     const qualified = related.filter((l) => l.is_qualified).length;
-    // Продажи/выручка по объявлению — из ФАКТИЧЕСКИХ платежей в Google Таблице (не из поля
-    // "Бюджет" amoCRM — оно ненадёжное, перезаписывается на каждом этапе). При синке каждому
-    // платежу, помеченному как "с рекламы" (markAdsPayments), уже приклеено название объявления
-    // (ad_name) из amoCRM — тут просто группируем эти платежи по совпадению названия.
-    const adPayments = sheetSeg.filter((r) => r.is_from_ads && r.ad_name && normalizeName(r.ad_name) === fbAdNameNorm);
-    const revenue = adPayments.reduce((sum, r) => sum + r.amount, 0);
-    const sales = adPayments.length;
+    // Продажи/выручка по объявлению — сделки, сматченные по названию, у которых статус
+    // "Успешно реализовано" (is_success). Сумма берётся из поля "Бюджет" (l.price) этой сделки.
+    const successDeals = related.filter((l) => l.is_success);
+    const revenue = successDeals.reduce((sum, l) => sum + (l.price || 0), 0);
+    const sales = successDeals.length;
 
     const cpl = leads > 0 ? fb.spend / leads : null;
     const cpql = qualified > 0 ? fb.spend / qualified : null;

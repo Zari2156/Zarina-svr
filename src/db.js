@@ -187,11 +187,23 @@ function getGeneralSalesInRange(since, until) {
   return db.prepare(`SELECT * FROM general_sales WHERE date BETWEEN ? AND ?`).all(since, until);
 }
 
+// Читает уже сохранённые ранее (при прошлых синках) значения is_from_ads/ad_name по списку ID —
+// нужно, чтобы при новом синке не затирать нулями флаги у платежей, которые сейчас вне
+// проверяемого периода (их просто не трогаем, оставляем как было).
+function getAdsFlagsByIds(ids) {
+  if (!ids || ids.length === 0) return {};
+  const placeholders = ids.map(() => '?').join(',');
+  const rows = db.prepare(`SELECT id, is_from_ads, ad_name FROM general_sales WHERE id IN (${placeholders})`).all(...ids);
+  const result = {};
+  for (const r of rows) result[String(r.id)] = { is_from_ads: r.is_from_ads, ad_name: r.ad_name };
+  return result;
+}
+
 function getLastSync() {
   return db.prepare('SELECT * FROM sync_log ORDER BY id DESC LIMIT 1').get();
 }
 
 module.exports = {
   upsertFbInsights, upsertAmoLeads, upsertGeneralSales, logSync,
-  getFbInsightsInRange, getAmoLeadsInRange, getGeneralSalesInRange, getLastSync,
+  getFbInsightsInRange, getAmoLeadsInRange, getGeneralSalesInRange, getAdsFlagsByIds, getLastSync,
 };

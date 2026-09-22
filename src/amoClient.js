@@ -6,6 +6,13 @@ function getField(lead, fieldId) {
   return field && field.values && field.values[0] ? field.values[0].value : null;
 }
 
+// Распознаёт значение "Да" в поле-флажке независимо от регистра/формата (Да / ДА / true / yes)
+function isYes(value) {
+  if (value === null || value === undefined) return false;
+  const v = String(value).trim().toLowerCase();
+  return v === 'да' || v === 'yes' || v === 'true' || v === '1';
+}
+
 function classifySegment(klass, nishClasses, entClasses) {
   const k = Number(klass);
   if (nishClasses.includes(k)) return 'nish';
@@ -19,7 +26,7 @@ async function fetchAmoLeads(since, until) {
     AMO_SUBDOMAIN, AMO_ACCESS_TOKEN, AMO_PIPELINE_ID,
     AMO_STATUS_QUALIFIED, AMO_STATUS_SUCCESS, AMO_STATUS_FULL_PAYMENT, AMO_STATUS_WON,
     AMO_FIELD_CAMPAIGN_ID, AMO_FIELD_ADSET_ID, AMO_FIELD_AD_ID, AMO_FIELD_CLASS, AMO_FIELD_DEPARTMENT,
-    AMO_FIELD_FB_CAMPAIGN_NAME, AMO_FIELD_FB_ADSET_NAME, AMO_FIELD_FB_AD_NAME,
+    AMO_FIELD_FB_CAMPAIGN_NAME, AMO_FIELD_FB_ADSET_NAME, AMO_FIELD_FB_AD_NAME, AMO_FIELD_QUALIFIED_FLAG,
     NISH_CLASSES, ENT_CLASSES,
   } = process.env;
 
@@ -96,7 +103,11 @@ async function fetchAmoLeads(since, until) {
         segment: classifySegment(klass, nishClasses, entClasses),
         department: getField(lead, AMO_FIELD_DEPARTMENT),
         tags: tagNames,
-        is_qualified: Number(lead.status_id) === Number(AMO_STATUS_QUALIFIED) ? 1 : 0,
+        // Квал засчитывается, если ЛИБО текущий статус сделки = "Квалификация пройдена",
+        // ЛИБО отдельное поле-флажок "Квалификация пройдена" (Да/Нет) стоит на "Да" —
+        // проверяем оба варианта, чтобы не терять квалов, если что-то одно не сработает.
+        is_qualified: (Number(lead.status_id) === Number(AMO_STATUS_QUALIFIED)
+          || isYes(getField(lead, AMO_FIELD_QUALIFIED_FLAG))) ? 1 : 0,
         is_success: Number(lead.status_id) === Number(successStatus) ? 1 : 0,
         is_full_payment: Number(lead.status_id) === Number(AMO_STATUS_FULL_PAYMENT) ? 1 : 0,
         synced_at: new Date().toISOString(),
