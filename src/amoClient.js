@@ -114,13 +114,13 @@ async function fetchAmoLeads(since, until) {
 // В отличие от fetchAmoLeads, НЕ ограничена датой создания сделки — нужна сделка любого возраста,
 // если оплата по ней (из Google Таблицы) попала в выбранный период.
 async function fetchAmoLeadsByIds(ids) {
-  const { AMO_SUBDOMAIN, AMO_ACCESS_TOKEN } = process.env;
+  const { AMO_SUBDOMAIN, AMO_ACCESS_TOKEN, AMO_FIELD_FB_AD_NAME } = process.env;
   if (!AMO_SUBDOMAIN || !AMO_ACCESS_TOKEN) {
     throw new Error('AMO_SUBDOMAIN или AMO_ACCESS_TOKEN не заданы в .env');
   }
 
   const uniqueIds = [...new Set((ids || []).map((id) => String(id).trim()).filter(Boolean))];
-  const result = {}; // { [leadId]: ['tag1', 'tag2', ...] }
+  const result = {}; // { [leadId]: { tags: ['tag1', ...], ad_name: 'Название объявления' | null } }
   if (uniqueIds.length === 0) return result;
 
   const batchSize = 50; // безопасный размер пачки для длины URL
@@ -128,7 +128,7 @@ async function fetchAmoLeadsByIds(ids) {
     const batch = uniqueIds.slice(i, i + batchSize);
     const params = new URLSearchParams();
     batch.forEach((id) => params.append('filter[id][]', id));
-    params.append('with', 'tags');
+    params.append('with', 'tags,custom_fields_values');
     params.append('limit', String(batchSize));
 
     const url = `https://${AMO_SUBDOMAIN}.amocrm.ru/api/v4/leads?${params.toString()}`;
@@ -147,7 +147,10 @@ async function fetchAmoLeadsByIds(ids) {
     const pageLeads = (resp.data._embedded && resp.data._embedded.leads) || [];
     for (const lead of pageLeads) {
       const tagNames = ((lead._embedded && lead._embedded.tags) || []).map((t) => t.name);
-      result[String(lead.id)] = tagNames;
+      result[String(lead.id)] = {
+        tags: tagNames,
+        ad_name: getField(lead, AMO_FIELD_FB_AD_NAME),
+      };
     }
   }
 

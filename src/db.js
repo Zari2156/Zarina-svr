@@ -59,6 +59,7 @@ CREATE TABLE IF NOT EXISTS general_sales (
   payment_type TEXT,
   is_new INTEGER DEFAULT 0,
   is_from_ads INTEGER DEFAULT 0,
+  ad_name TEXT,
   date TEXT,
   manager TEXT,
   synced_at TEXT
@@ -81,6 +82,11 @@ CREATE TABLE IF NOT EXISTS sync_log (
 // CREATE TABLE IF NOT EXISTS не добавляет новые колонки в уже существующую таблицу.
 try {
   db.exec(`ALTER TABLE general_sales ADD COLUMN is_from_ads INTEGER DEFAULT 0`);
+} catch (e) {
+  // колонка уже есть — это нормально, ничего не делаем
+}
+try {
+  db.exec(`ALTER TABLE general_sales ADD COLUMN ad_name TEXT`);
 } catch (e) {
   // колонка уже есть — это нормально, ничего не делаем
 }
@@ -139,14 +145,14 @@ function upsertAmoLeads(leads) {
 
 function upsertGeneralSales(rows) {
   const stmt = db.prepare(`
-    INSERT INTO general_sales (id, name, amount, klass, segment, payment_type, is_new, is_from_ads, date, manager, synced_at)
-    VALUES (@id, @name, @amount, @klass, @segment, @payment_type, @is_new, @is_from_ads, @date, @manager, @synced_at)
+    INSERT INTO general_sales (id, name, amount, klass, segment, payment_type, is_new, is_from_ads, ad_name, date, manager, synced_at)
+    VALUES (@id, @name, @amount, @klass, @segment, @payment_type, @is_new, @is_from_ads, @ad_name, @date, @manager, @synced_at)
     ON CONFLICT(id) DO UPDATE SET
       name=excluded.name, amount=excluded.amount, klass=excluded.klass, segment=excluded.segment,
-      payment_type=excluded.payment_type, is_new=excluded.is_new, is_from_ads=excluded.is_from_ads, date=excluded.date,
-      manager=excluded.manager, synced_at=excluded.synced_at
+      payment_type=excluded.payment_type, is_new=excluded.is_new, is_from_ads=excluded.is_from_ads,
+      ad_name=excluded.ad_name, date=excluded.date, manager=excluded.manager, synced_at=excluded.synced_at
   `);
-  const insertMany = db.transaction((items) => { for (const item of items) stmt.run({ is_from_ads: 0, ...item }); });
+  const insertMany = db.transaction((items) => { for (const item of items) stmt.run({ is_from_ads: 0, ad_name: null, ...item }); });
   insertMany(rows);
 }
 

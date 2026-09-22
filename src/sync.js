@@ -18,14 +18,14 @@ function getAdsTags() {
 async function markAdsPayments(sheetRows) {
   const adsTags = getAdsTags();
   const idsToCheck = sheetRows.filter((r) => r.is_new).map((r) => r.id);
-  const tagsById = await fetchAmoLeadsByIds(idsToCheck);
+  const leadInfoById = await fetchAmoLeadsByIds(idsToCheck); // { [id]: { tags, ad_name } }
 
   return sheetRows.map((r) => {
-    if (!r.is_new) return { ...r, is_from_ads: 0 };
-    const tags = tagsById[String(r.id)] || [];
+    if (!r.is_new) return { ...r, is_from_ads: 0, ad_name: null };
+    const info = leadInfoById[String(r.id)] || { tags: [], ad_name: null };
     const relevantTags = r.segment === 'nish' ? adsTags.nish : r.segment === 'ent' ? adsTags.ent : [];
-    const matched = relevantTags.length > 0 && tags.some((t) => relevantTags.includes(t));
-    return { ...r, is_from_ads: matched ? 1 : 0 };
+    const matched = relevantTags.length > 0 && info.tags.some((t) => relevantTags.includes(t));
+    return { ...r, is_from_ads: matched ? 1 : 0, ad_name: matched ? info.ad_name : null };
   });
 }
 
@@ -99,14 +99,13 @@ function buildSegmentReport(segment, since, until, fbRows, amoLeads, sheetRows, 
     // прямо из Facebook (fb_leads) — там это уже посчитано точно средствами самого Facebook.
     const leads = fb.fb_leads || 0;
     const qualified = related.filter((l) => l.is_qualified).length;
-    // Продажи/выручка по объявлению — пока всё ещё по текущему статусу amoCRM (is_success/is_full_payment).
-    // ВАЖНО: в отличие от adsBlock ниже, эта детализация по объявлениям ещё НЕ переведена на
-    // деньги из Google Таблицы — здесь используется старое поле "Бюджет" amoCRM. Это отдельная
-    // задача на доработку, если нужна точная выручка в разрезе по каждому креативу.
-    const success = related.filter((l) => l.is_success);
-    const fullPayments = related.filter((l) => l.is_full_payment);
-    const revenue = success.reduce((sum, l) => sum + (l.price || 0), 0);
-    const sales = fullPayments.length;
+    // Продажи/выручка по объявлению — из ФАКТИЧЕСКИХ платежей в Google Таблице (не из поля
+    // "Бюджет" amoCRM — оно ненадёжное, перезаписывается на каждом этапе). При синке каждому
+    // платежу, помеченному как "с рекламы" (markAdsPayments), уже приклеено название объявления
+    // (ad_name) из amoCRM — тут просто группируем эти платежи по совпадению названия.
+    const adPayments = sheetSeg.filter((r) => r.is_from_ads && r.ad_name && normalizeName(r.ad_name) === fbAdNameNorm);
+    const revenue = adPayments.reduce((sum, r) => sum + r.amount, 0);
+    const sales = adPayments.length;
 
     const cpl = leads > 0 ? fb.spend / leads : null;
     const cpql = qualified > 0 ? fb.spend / qualified : null;
