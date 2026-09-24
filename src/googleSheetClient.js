@@ -28,6 +28,7 @@ async function fetchGeneralSales() {
   const { data } = await axios.get(GOOGLE_SHEET_API_URL, {
     validateStatus: () => true,
     maxRedirects: 5,
+    timeout: 60000, // 60 секунд — если Apps Script не ответил за это время, лучше явная ошибка, чем зависание
   });
 
   // Скрипт может вернуть данные строкой (если Content-Type не application/json) — подстрахуемся

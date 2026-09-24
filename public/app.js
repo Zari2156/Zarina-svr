@@ -110,8 +110,6 @@ function renderGeneralSalesBlock(block) {
   if (!block) return;
   document.getElementById('generalSalesBlock').innerHTML = [
     { label: 'Всего продаж (сумма)', value: fmt(block.total) },
-    { label: 'Новые договоры', value: fmt(block.new) },
-    { label: 'Повторные продажи', value: fmt(block.repeat) },
     { label: 'Кол-во сделок', value: fmt(block.count) },
     { label: 'Квал. лидов (весь сегмент)', value: fmt(block.qualified) },
   ].map(c => `<div class="mini-stat"><div class="mini-stat__label">${c.label}</div><div class="mini-stat__value">${c.value}</div></div>`).join('');

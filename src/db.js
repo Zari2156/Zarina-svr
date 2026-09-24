@@ -65,6 +65,19 @@ CREATE TABLE IF NOT EXISTS general_sales (
   synced_at TEXT
 );
 
+-- Сделки, дошедшие до успешной оплаты, по дате ЗАКЛЮЧЕНИЯ ДОГОВОРА — источник для "Общих продаж"
+-- и блока "С рекламы" вместо Google Таблицы (см. fetchAmoSalesByContractDate в amoClient.js).
+CREATE TABLE IF NOT EXISTS amo_sales (
+  id INTEGER PRIMARY KEY,
+  price REAL DEFAULT 0,
+  klass TEXT,
+  segment TEXT,
+  tags TEXT,
+  fb_ad_name TEXT,
+  contract_date INTEGER,
+  synced_at TEXT
+);
+
 CREATE TABLE IF NOT EXISTS sync_log (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   ran_at TEXT,
@@ -187,6 +200,22 @@ function getGeneralSalesInRange(since, until) {
   return db.prepare(`SELECT * FROM general_sales WHERE date BETWEEN ? AND ?`).all(since, until);
 }
 
+function upsertAmoSales(rows) {
+  const stmt = db.prepare(`
+    INSERT INTO amo_sales (id, price, klass, segment, tags, fb_ad_name, contract_date, synced_at)
+    VALUES (@id, @price, @klass, @segment, @tags, @fb_ad_name, @contract_date, @synced_at)
+    ON CONFLICT(id) DO UPDATE SET
+      price=excluded.price, klass=excluded.klass, segment=excluded.segment, tags=excluded.tags,
+      fb_ad_name=excluded.fb_ad_name, contract_date=excluded.contract_date, synced_at=excluded.synced_at
+  `);
+  const insertMany = db.transaction((items) => { for (const item of items) stmt.run(item); });
+  insertMany(rows);
+}
+
+function getAmoSalesInRange(sinceTs, untilTs) {
+  return db.prepare(`SELECT * FROM amo_sales WHERE contract_date BETWEEN ? AND ?`).all(sinceTs, untilTs);
+}
+
 // Читает уже сохранённые ранее (при прошлых синках) значения is_from_ads/ad_name по списку ID —
 // нужно, чтобы при новом синке не затирать нулями флаги у платежей, которые сейчас вне
 // проверяемого периода (их просто не трогаем, оставляем как было).
@@ -204,6 +233,6 @@ function getLastSync() {
 }
 
 module.exports = {
-  upsertFbInsights, upsertAmoLeads, upsertGeneralSales, logSync,
-  getFbInsightsInRange, getAmoLeadsInRange, getGeneralSalesInRange, getAdsFlagsByIds, getLastSync,
+  upsertFbInsights, upsertAmoLeads, upsertGeneralSales, upsertAmoSales, logSync,
+  getFbInsightsInRange, getAmoLeadsInRange, getGeneralSalesInRange, getAmoSalesInRange, getAdsFlagsByIds, getLastSync,
 };

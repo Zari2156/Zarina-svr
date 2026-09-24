@@ -5,7 +5,7 @@ const cron = require('node-cron');
 const path = require('path');
 
 const { runSync, buildJoinedReport } = require('./src/sync');
-const { fetchAmoMeta } = require('./src/amoClient');
+const { fetchAmoMeta, fetchLeadDebug } = require('./src/amoClient');
 
 const app = express();
 app.use(cors());
@@ -82,6 +82,32 @@ app.get('/api/amo-meta', async (req, res) => {
 });
 
 app.get('/api/health', (req, res) => res.json({ ok: true }));
+
+// Отладка одной сделки по ID — показывает ВСЕ её поля с расшифрованными названиями,
+// а не только ID. Полезно, когда в amoCRM несколько полей с одинаковым названием и непонятно,
+// какое из них реально используется у конкретной сделки.
+// Пример: /api/lead-debug/32072791
+app.get('/api/lead-debug/:id', async (req, res) => {
+  try {
+    const data = await fetchLeadDebug(req.params.id);
+    const fieldsRows = data.fields.map((f) =>
+      `<tr><td>${f.field_id}</td><td>${f.field_name}</td><td><b>${f.value === null ? '—' : f.value}</b></td></tr>`
+    ).join('');
+    res.send(`
+      <html><head><meta charset="utf-8"><title>Сделка #${data.id}</title></head>
+      <body style="font-family: sans-serif; padding: 20px;">
+        <h2>Сделка #${data.id}: ${data.name}</h2>
+        <p>status_id: ${data.status_id} | Бюджет: ${data.price} | Теги: ${data.tags.join(', ') || '—'}</p>
+        <table border="1" cellpadding="6" style="border-collapse:collapse">
+          <tr><th>ID поля</th><th>Название поля</th><th>Значение у этой сделки</th></tr>
+          ${fieldsRows}
+        </table>
+      </body></html>
+    `);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {

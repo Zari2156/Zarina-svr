@@ -1,6 +1,5 @@
 const { fetchFacebookInsights } = require('./facebookClient');
-const { fetchAmoLeads, fetchAmoLeadsByIds } = require('./amoClient');
-const { fetchGeneralSales } = require('./googleSheetClient');
+const { fetchAmoLeads, fetchAmoSalesByContractDate } = require('./amoClient');
 const db = require('./db');
 const { buildRecommendations } = require('./recommendations');
 
@@ -9,35 +8,6 @@ function getAdsTags() {
     nish: (process.env.ADS_TAGS_NISH || '').split(',').map((t) => t.trim()).filter(Boolean),
     ent: (process.env.ADS_TAGS_ENT || '').split(',').map((t) => t.trim()).filter(Boolean),
   };
-}
-
-// Помечает у каждого НОВОГО платежа (is_new=1) из Google Таблицы, пришёл ли он "с рекламы":
-// ищет сделку с таким же ID в amoCRM и проверяет тег + название объявления.
-// ВАЖНО: проверяем по amoCRM только платежи ИЗ ТЕКУЩЕГО ПЕРИОДА синхронизации (since..until),
-// а не всю историю таблицы — иначе с каждым синком число запросов к amoCRM растёт бесконечно
-// и синхронизация может не укладываться по времени.
-async function markAdsPayments(sheetRows, since, until) {
-  const adsTags = getAdsTags();
-  const inPeriod = (r) => r.date >= since && r.date <= until;
-  const idsToCheck = sheetRows.filter((r) => r.is_new && inPeriod(r)).map((r) => r.id);
-  const leadInfoById = await fetchAmoLeadsByIds(idsToCheck); // { [id]: { tags, ad_name } }
-
-  // Для платежей ВНЕ текущего периода — подтягиваем уже посчитанное раньше значение,
-  // а не сбрасываем в 0 (иначе с каждым синком терялись бы старые "с рекламы"-платежи).
-  const outOfPeriodIds = sheetRows.filter((r) => r.is_new && !inPeriod(r)).map((r) => r.id);
-  const previousFlags = db.getAdsFlagsByIds(outOfPeriodIds);
-
-  return sheetRows.map((r) => {
-    if (!r.is_new) return { ...r, is_from_ads: 0, ad_name: null };
-    if (!inPeriod(r)) {
-      const prev = previousFlags[String(r.id)];
-      return prev ? { ...r, is_from_ads: prev.is_from_ads, ad_name: prev.ad_name } : { ...r, is_from_ads: 0, ad_name: null };
-    }
-    const info = leadInfoById[String(r.id)] || { tags: [], ad_name: null };
-    const relevantTags = r.segment === 'nish' ? adsTags.nish : r.segment === 'ent' ? adsTags.ent : [];
-    const matched = relevantTags.length > 0 && info.tags.some((t) => relevantTags.includes(t));
-    return { ...r, is_from_ads: matched ? 1 : 0, ad_name: matched ? info.ad_name : null };
-  });
 }
 
 // Приводит название к единому виду для сравнения: убирает разницу в регистре, лишние пробелы
@@ -62,23 +32,35 @@ async function runSync(sinceIn, untilIn) {
   const { since, until } = defaultRangeIfMissing(sinceIn, untilIn);
 
   try {
-    const [fbRows, amoLeads, sheetRowsRaw] = await Promise.all([
-      fetchFacebookInsights(since, until),
-      fetchAmoLeads(since, until),
-      fetchGeneralSales(), // отдаёт весь лог; отфильтруем по датам при чтении из БД
-    ]);
+    // Раньше три запроса шли параллельно (Promise.all), и в логах при зависании было не видно,
+    // какой именно из них виснет. Теперь идут по очереди, с логом времени каждого шага —
+    // если синк опять зависнет, в логах будет точно видно, на каком шаге.
+    console.log(`[sync] Старт (${since} — ${until})`);
 
-    // Для каждого нового платежа из таблицы проверяем в amoCRM по ID, есть ли рекламный тег —
-    // это отдельный запрос к amoCRM (по ID, не по дате создания сделки), делаем один раз тут при синке.
-    const sheetRows = await markAdsPayments(sheetRowsRaw, since, until);
+    let t0 = Date.now();
+    const fbRows = await fetchFacebookInsights(since, until);
+    console.log(`[sync] Facebook: ${fbRows.length} строк за ${((Date.now() - t0) / 1000).toFixed(1)}с`);
+
+    t0 = Date.now();
+    const amoLeads = await fetchAmoLeads(since, until);
+    console.log(`[sync] amoCRM (сделки): ${amoLeads.length} строк за ${((Date.now() - t0) / 1000).toFixed(1)}с`);
+
+    // Источник выручки — НЕ Google Таблица (убрали её полностью, третий источник только тормозил),
+    // а сама amoCRM: сделки, дошедшие до успешной оплаты, отфильтрованные по дате ЗАКЛЮЧЕНИЯ
+    // ДОГОВОРА. Остаётся всего два источника — Facebook + amoCRM.
+    t0 = Date.now();
+    const amoSales = await fetchAmoSalesByContractDate(since, until);
+    console.log(`[sync] amoCRM (продажи): ${amoSales.length} строк за ${((Date.now() - t0) / 1000).toFixed(1)}с`);
 
     db.upsertFbInsights(fbRows);
     db.upsertAmoLeads(amoLeads);
-    db.upsertGeneralSales(sheetRows);
-    db.logSync({ since, until, fbRows: fbRows.length, amoRows: amoLeads.length, sheetRows: sheetRows.length, status: 'ok' });
+    const sinceTs = Math.floor(new Date(since + 'T00:00:00Z').getTime() / 1000);
+    const untilTs = Math.floor(new Date(until + 'T23:59:59Z').getTime() / 1000);
+    db.upsertAmoSales(amoSales.map((s) => ({ ...s, contract_date: s.contract_date || null, synced_at: new Date().toISOString() })));
+    db.logSync({ since, until, fbRows: fbRows.length, amoRows: amoLeads.length, sheetRows: amoSales.length, status: 'ok' });
 
-    console.log(`[sync] OK (${since} — ${until}): FB ${fbRows.length}, amoCRM ${amoLeads.length}, таблица ${sheetRows.length}`);
-    return { since, until, fbRows: fbRows.length, amoRows: amoLeads.length, sheetRows: sheetRows.length };
+    console.log(`[sync] OK (${since} — ${until}): FB ${fbRows.length}, amoCRM сделки ${amoLeads.length}, amoCRM продажи ${amoSales.length}`);
+    return { since, until, fbRows: fbRows.length, amoRows: amoLeads.length, sheetRows: amoSales.length };
   } catch (err) {
     db.logSync({ since, until, status: 'error', error: err.message });
     console.error('[sync] ОШИБКА:', err.message);
@@ -86,20 +68,23 @@ async function runSync(sinceIn, untilIn) {
   }
 }
 
-// Строит один сегмент (НИШ или ЕНТ): джойн Facebook+amoCRM по ad_id + блок "с рекламы" по тегам
-// + общие продажи из Google Таблицы.
+// Строит один сегмент (НИШ или ЕНТ): джойн Facebook+amoCRM по ad_id/названию + блок "с рекламы"
+// по тегам + общие продажи. Все данные — из двух источников: Facebook и amoCRM (Google Таблица
+// больше не используется).
 // "Лид" — сделка СОЗДАНА в выбранном периоде. "Квал" — на момент синхронизации текущий статус
-// сделки равен статусу "Квалификация пройдена" (AMO_STATUS_QUALIFIED) — сделки в этой воронке
-// с этого статуса дальше не переходят, поэтому текущего статуса достаточно.
-function buildSegmentReport(segment, since, until, fbRows, amoLeads, sheetRows, adsTags) {
+// сделки равен статусу "Квалификация пройдена". "Продажа"/"Выручка" — сделки со статусом
+// "Успешно реализовано", попавшие в период по ДАТЕ ЗАКЛЮЧЕНИЯ ДОГОВОРА (amoSalesRows).
+function buildSegmentReport(segment, since, until, fbRows, amoLeads, amoSalesRows, adsTags) {
   const fbSeg = fbRows.filter((r) => r.segment === segment);
   const amoSeg = amoLeads.filter((r) => r.segment === segment);
-  const sheetSeg = sheetRows.filter((r) => r.segment === segment);
+  const salesSeg = amoSalesRows.filter((r) => r.segment === segment);
+
+  const hasAdsTag = (tagsStr, list) => (tagsStr || '').split(',').map((t) => t.trim()).some((t) => list.includes(t));
 
   // --- Джойн по объявлениям (детализация по каждому креативу) ---
   const rows = fbSeg.map((fb) => {
     const fbAdNameNorm = normalizeName(fb.ad_name);
-    // Сопоставление с amoCRM нужно ТОЛЬКО для квалов/продаж (Facebook не знает о квалификации) —
+    // Сопоставление с amoCRM нужно ТОЛЬКО для квалов (Facebook не знает о квалификации) —
     // сначала пробуем по ad_id (если он вообще у кого-то заполнен), иначе по названию объявления
     // (FB_AD_NAME из amoCRM, приходит через Zapier-интеграцию с Facebook).
     let related = amoSeg.filter((l) => l.ad_id && String(l.ad_id) === String(fb.ad_id));
@@ -110,11 +95,11 @@ function buildSegmentReport(segment, since, until, fbRows, amoLeads, sheetRows, 
     // прямо из Facebook (fb_leads) — там это уже посчитано точно средствами самого Facebook.
     const leads = fb.fb_leads || 0;
     const qualified = related.filter((l) => l.is_qualified).length;
-    // Продажи/выручка по объявлению — сделки, сматченные по названию, у которых статус
-    // "Успешно реализовано" (is_success). Сумма берётся из поля "Бюджет" (l.price) этой сделки.
-    const successDeals = related.filter((l) => l.is_success);
-    const revenue = successDeals.reduce((sum, l) => sum + (l.price || 0), 0);
-    const sales = successDeals.length;
+    // Продажи/выручка по объявлению — сделки из amoSales (уже отфильтрованы по статусу
+    // "Успешно реализовано" и дате заключения договора), сматченные по названию объявления.
+    const adSales = salesSeg.filter((s) => s.fb_ad_name && normalizeName(s.fb_ad_name) === fbAdNameNorm);
+    const revenue = adSales.reduce((sum, s) => sum + (s.price || 0), 0);
+    const sales = adSales.length;
 
     const cpl = leads > 0 ? fb.spend / leads : null;
     const cpql = qualified > 0 ? fb.spend / qualified : null;
@@ -132,22 +117,16 @@ function buildSegmentReport(segment, since, until, fbRows, amoLeads, sheetRows, 
   });
 
   // --- Блок "С рекламы" (считаем ДО totals, т.к. totals берёт из него продажи/выручку) ---
-  const adsLeads = amoSeg.filter((l) => {
-    const tags = (l.tags || '').split(',').map((t) => t.trim());
-    return tags.some((t) => adsTags.includes(t));
-  });
+  const adsLeads = amoSeg.filter((l) => hasAdsTag(l.tags, adsTags));
   const adsQualifiedCount = adsLeads.filter((l) => l.is_qualified).length;
-  // sales / revenue — деньги: берём НЕ из поля "Бюджет" amoCRM (оно меняется по ходу сделки и
-  // не хранит историю) и НЕ из джойна по ad_id (он работает только если сделке проставлен ID
-  // объявления — а это есть не всегда), а из фактических платежей в Google Таблице, помеченных
-  // при синке (markAdsPayments) как "с рекламы" — по совпадению ID сделки + рекламный тег.
-  const adsPayments = sheetSeg.filter((r) => r.is_from_ads);
+  // sales / revenue — сделки из amoSales (успешные, по дате заключения договора) с рекламным тегом.
+  const adsPayments = salesSeg.filter((s) => hasAdsTag(s.tags, adsTags));
   const adsBlock = {
     leads: adsLeads.length,
     qualified: adsQualifiedCount,
     percentQualified: adsLeads.length > 0 ? (adsQualifiedCount / adsLeads.length) * 100 : null,
     sales: adsPayments.length,
-    revenue: adsPayments.reduce((sum, r) => sum + r.amount, 0),
+    revenue: adsPayments.reduce((sum, s) => sum + (s.price || 0), 0),
   };
 
   // Итоги сегмента: leads/qualified — по ВСЕМ сделкам сегмента за период (не зависит от ad_id).
@@ -168,15 +147,13 @@ function buildSegmentReport(segment, since, until, fbRows, amoLeads, sheetRows, 
   totals.percentQualified = totals.leads > 0 ? (totals.qualified / totals.leads) * 100 : null;
   totals.roas = totals.spend > 0 ? totals.revenue / totals.spend : null;
 
-  // --- Общие продажи (все источники, из Google Таблицы) ---
-  // Квал. лиды тут — НЕ из таблицы (там их нет), а широким фильтром по amoCRM: весь сегмент
-  // (Online + класс НИШ/ЕНТ) за период, без привязки к тегам/рекламе — теговые лиды и так уже
-  // входят в этот широкий охват.
+  // --- Общие продажи (все источники) ---
+  // Считаем ПО ВСЕМ сделкам сегмента (Online + класс НИШ/ЕНТ), дошедшим до успешной оплаты в
+  // периоде — не только с рекламы. Разбивку "новые/повторные" убрали вместе с Google Таблицей —
+  // amoCRM в этом разрезе такого деления не даёт; если нужно будет вернуть, обсудим отдельно.
   const generalSales = {
-    total: sheetSeg.reduce((sum, r) => sum + r.amount, 0),
-    new: sheetSeg.filter((r) => r.is_new).reduce((sum, r) => sum + r.amount, 0),
-    repeat: sheetSeg.filter((r) => !r.is_new).reduce((sum, r) => sum + r.amount, 0),
-    count: sheetSeg.length,
+    total: salesSeg.reduce((sum, s) => sum + (s.price || 0), 0),
+    count: salesSeg.length,
     qualified: totalQualified,
   };
 
@@ -186,13 +163,15 @@ function buildSegmentReport(segment, since, until, fbRows, amoLeads, sheetRows, 
 function buildJoinedReport(since, until) {
   const fbRows = db.getFbInsightsInRange(since, until);
   const amoLeads = db.getAmoLeadsInRange(since, until);
-  const sheetRows = db.getGeneralSalesInRange(since, until);
+  const sinceTs = Math.floor(new Date(since + 'T00:00:00Z').getTime() / 1000);
+  const untilTs = Math.floor(new Date(until + 'T23:59:59Z').getTime() / 1000);
+  const amoSalesRows = db.getAmoSalesInRange(sinceTs, untilTs);
 
   const adsTagsNish = (process.env.ADS_TAGS_NISH || '').split(',').map((t) => t.trim()).filter(Boolean);
   const adsTagsEnt = (process.env.ADS_TAGS_ENT || '').split(',').map((t) => t.trim()).filter(Boolean);
 
-  const nish = buildSegmentReport('nish', since, until, fbRows, amoLeads, sheetRows, adsTagsNish);
-  const ent = buildSegmentReport('ent', since, until, fbRows, amoLeads, sheetRows, adsTagsEnt);
+  const nish = buildSegmentReport('nish', since, until, fbRows, amoLeads, amoSalesRows, adsTagsNish);
+  const ent = buildSegmentReport('ent', since, until, fbRows, amoLeads, amoSalesRows, adsTagsEnt);
 
   // ВРЕМЕННАЯ ДИАГНОСТИКА: показывает, как распределились сделки/объявления по сегментам,
   // чтобы понять, почему НИШ/ЕНТ могут быть пустыми.

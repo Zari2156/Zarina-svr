@@ -21,6 +21,95 @@ function classifySegment(klass, nishClasses, entClasses) {
 }
 
 
+// Быстро получает сделки, которые ДОШЛИ ДО УСПЕШНОЙ ОПЛАТЫ (статус "Успешно реализовано" —
+// или "Полная оплата получена", если задан отдельно) в заданный период, фильтруя ПО ДАТЕ
+// ЗАКЛЮЧЕНИЯ ДОГОВОРА (не по дате создания сделки — сделка могла быть создана намного раньше).
+// Используется для "Общих продаж" и блока "С рекламы" — вместо чтения Google Таблицы: раз сделка
+// уже дошла до финального успешного статуса, поле "Бюджет" у неё больше не меняется, и можно
+// надёжно брать сумму прямо оттуда. Так остаётся всего два источника данных (Facebook + amoCRM).
+async function fetchAmoSalesByContractDate(since, until) {
+  const {
+    AMO_SUBDOMAIN, AMO_ACCESS_TOKEN, AMO_PIPELINE_ID,
+    AMO_STATUS_SUCCESS, AMO_STATUS_FULL_PAYMENT, AMO_STATUS_WON,
+    AMO_FIELD_CLASS, AMO_FIELD_DEPARTMENT, AMO_FIELD_CONTRACT_DATE,
+    NISH_CLASSES, ENT_CLASSES,
+  } = process.env;
+
+  if (!AMO_SUBDOMAIN || !AMO_ACCESS_TOKEN) {
+    throw new Error('AMO_SUBDOMAIN или AMO_ACCESS_TOKEN не заданы в .env');
+  }
+  if (!AMO_FIELD_CONTRACT_DATE || AMO_FIELD_CONTRACT_DATE === '0') {
+    // Поле "Дата заключения договора" ещё не настроено — не ломаем синк, просто ничего не отдаём.
+    console.error('[amoClient] AMO_FIELD_CONTRACT_DATE не задан — fetchAmoSalesByContractDate пропущен');
+    return [];
+  }
+
+  const nishClasses = (NISH_CLASSES || '3,4,5,6').split(',').map(Number);
+  const entClasses = (ENT_CLASSES || '9,10,11').split(',').map(Number);
+  const successStatus = AMO_STATUS_SUCCESS || AMO_STATUS_WON;
+  const statusIds = [successStatus, AMO_STATUS_FULL_PAYMENT].filter(Boolean);
+
+  const sinceTs = Math.floor(new Date(since + 'T00:00:00Z').getTime() / 1000);
+  const untilTs = Math.floor(new Date(until + 'T23:59:59Z').getTime() / 1000);
+
+  const leads = [];
+  let page = 1;
+  const limit = 250;
+
+  while (true) {
+    const url = `https://${AMO_SUBDOMAIN}.amocrm.ru/api/v4/leads`;
+    const params = {
+      'filter[pipeline_id]': AMO_PIPELINE_ID,
+      [`filter[custom_fields_values][${AMO_FIELD_CONTRACT_DATE}][from]`]: sinceTs,
+      [`filter[custom_fields_values][${AMO_FIELD_CONTRACT_DATE}][to]`]: untilTs,
+      with: 'custom_fields_values,tags',
+      page,
+      limit,
+    };
+    statusIds.forEach((s, i) => { params[`filter[status_id][${i}]`] = s; });
+
+    const resp = await axios.get(url, {
+      params,
+      headers: { Authorization: `Bearer ${AMO_ACCESS_TOKEN}` },
+      validateStatus: () => true, timeout: 60000,
+    });
+
+    if (resp.status === 204) break;
+    if (resp.status >= 400) {
+      throw new Error(`amoCRM API error (${resp.status}): ${JSON.stringify(resp.data)}`);
+    }
+
+    const pageLeads = (resp.data._embedded && resp.data._embedded.leads) || [];
+    if (pageLeads.length === 0) break;
+
+    for (const lead of pageLeads) {
+      const klass = getField(lead, AMO_FIELD_CLASS);
+      const department = getField(lead, AMO_FIELD_DEPARTMENT);
+      const tagNames = ((lead._embedded && lead._embedded.tags) || []).map((t) => t.name).join(',');
+
+      if (AMO_FIELD_DEPARTMENT && AMO_FIELD_DEPARTMENT !== '0') {
+        const dep = (department || '').toLowerCase();
+        if (dep !== 'online') continue;
+      }
+
+      leads.push({
+        id: lead.id,
+        price: lead.price || 0,
+        klass,
+        segment: classifySegment(klass, nishClasses, entClasses),
+        tags: tagNames,
+        fb_ad_name: getField(lead, process.env.AMO_FIELD_FB_AD_NAME),
+        contract_date: getField(lead, AMO_FIELD_CONTRACT_DATE),
+      });
+    }
+
+    if (pageLeads.length < limit) break;
+    page++;
+  }
+
+  return leads.filter((l) => l.segment !== null);
+}
+
 async function fetchAmoLeads(since, until) {
   const {
     AMO_SUBDOMAIN, AMO_ACCESS_TOKEN, AMO_PIPELINE_ID,
@@ -61,7 +150,7 @@ async function fetchAmoLeads(since, until) {
     const resp = await axios.get(url, {
       params,
       headers: { Authorization: `Bearer ${AMO_ACCESS_TOKEN}` },
-      validateStatus: () => true,
+      validateStatus: () => true, timeout: 60000,
     });
 
     if (resp.status === 204) break;
@@ -145,7 +234,7 @@ async function fetchAmoLeadsByIds(ids) {
     const url = `https://${AMO_SUBDOMAIN}.amocrm.ru/api/v4/leads?${params.toString()}`;
     const resp = await axios.get(url, {
       headers: { Authorization: `Bearer ${AMO_ACCESS_TOKEN}` },
-      validateStatus: () => true,
+      validateStatus: () => true, timeout: 60000,
     });
 
     if (resp.status === 204) continue; // ни одна сделка из пачки не найдена — не ошибка
@@ -198,7 +287,7 @@ async function fetchStatusChangeDates(leadIds, statusId) {
       const url = `https://${AMO_SUBDOMAIN}.amocrm.ru/api/v4/events?${params.toString()}`;
       const resp = await axios.get(url, {
         headers: { Authorization: `Bearer ${AMO_ACCESS_TOKEN}` },
-        validateStatus: () => true,
+        validateStatus: () => true, timeout: 60000,
       });
 
       if (resp.status === 204) break; // на этой пачке событий больше нет
@@ -238,8 +327,8 @@ async function fetchAmoMeta() {
   const headers = { Authorization: `Bearer ${AMO_ACCESS_TOKEN}` };
 
   const [fields, pipelines] = await Promise.all([
-    axios.get(`https://${AMO_SUBDOMAIN}.amocrm.ru/api/v4/leads/custom_fields?limit=250`, { headers, validateStatus: () => true }),
-    axios.get(`https://${AMO_SUBDOMAIN}.amocrm.ru/api/v4/leads/pipelines`, { headers, validateStatus: () => true }),
+    axios.get(`https://${AMO_SUBDOMAIN}.amocrm.ru/api/v4/leads/custom_fields?limit=250`, { headers, validateStatus: () => true, timeout: 60000 }),
+    axios.get(`https://${AMO_SUBDOMAIN}.amocrm.ru/api/v4/leads/pipelines`, { headers, validateStatus: () => true, timeout: 60000 }),
   ]);
 
   // Простой читаемый список полей: ID + название + код — чтобы не искать вручную по интерфейсу amoCRM.
@@ -257,4 +346,41 @@ async function fetchAmoMeta() {
   return { fieldsList, pipelinesList, raw: { fields: fields.data, pipelines: pipelines.data } };
 }
 
-module.exports = { fetchAmoLeads, fetchAmoLeadsByIds, fetchStatusChangeDates, fetchAmoMeta };
+// Ищет ОДНУ сделку по ID и отдаёт все её поля с расшифрованными названиями (не только ID) —
+// нужно, когда в amoCRM несколько полей с одинаковым названием и непонятно, какое из них
+// реально используется у конкретной сделки.
+async function fetchLeadDebug(leadId) {
+  const { AMO_SUBDOMAIN, AMO_ACCESS_TOKEN } = process.env;
+  const headers = { Authorization: `Bearer ${AMO_ACCESS_TOKEN}` };
+
+  const [leadResp, fieldsResp] = await Promise.all([
+    axios.get(`https://${AMO_SUBDOMAIN}.amocrm.ru/api/v4/leads/${leadId}?with=custom_fields_values,tags`, { headers, validateStatus: () => true, timeout: 60000 }),
+    axios.get(`https://${AMO_SUBDOMAIN}.amocrm.ru/api/v4/leads/custom_fields?limit=250`, { headers, validateStatus: () => true, timeout: 60000 }),
+  ]);
+
+  if (leadResp.status >= 400) {
+    throw new Error(`Сделка не найдена или ошибка API: ${leadResp.status}`);
+  }
+
+  const fieldNames = {}; // { [fieldId]: 'Название поля' }
+  const allFields = (fieldsResp.data._embedded && fieldsResp.data._embedded.custom_fields) || [];
+  for (const f of allFields) fieldNames[f.id] = f.name;
+
+  const lead = leadResp.data;
+  const values = (lead.custom_fields_values || []).map((f) => ({
+    field_id: f.field_id,
+    field_name: fieldNames[f.field_id] || '(неизвестное поле)',
+    value: f.values && f.values[0] ? f.values[0].value : null,
+  }));
+
+  return {
+    id: lead.id,
+    name: lead.name,
+    status_id: lead.status_id,
+    price: lead.price,
+    tags: ((lead._embedded && lead._embedded.tags) || []).map((t) => t.name),
+    fields: values,
+  };
+}
+
+module.exports = { fetchAmoLeads, fetchAmoLeadsByIds, fetchAmoSalesByContractDate, fetchStatusChangeDates, fetchAmoMeta, fetchLeadDebug };

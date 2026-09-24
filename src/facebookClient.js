@@ -36,7 +36,7 @@ async function fetchFacebookInsights(since, until) {
 
   const rows = [];
   while (url) {
-    const { data } = await axios.get(url, { params, validateStatus: () => true });
+    const { data } = await axios.get(url, { params, validateStatus: () => true, timeout: 60000 });
 
     if (data.error) {
       throw new Error(`Facebook API error: ${data.error.message}`);
