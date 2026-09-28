@@ -22,11 +22,16 @@ function classifySegment(klass, nishClasses, entClasses) {
 
 
 // Быстро получает сделки, которые ДОШЛИ ДО УСПЕШНОЙ ОПЛАТЫ (статус "Успешно реализовано" —
-// или "Полная оплата получена", если задан отдельно) в заданный период, фильтруя ПО ДАТЕ
-// ЗАКЛЮЧЕНИЯ ДОГОВОРА (не по дате создания сделки — сделка могла быть создана намного раньше).
-// Используется для "Общих продаж" и блока "С рекламы" — вместо чтения Google Таблицы: раз сделка
-// уже дошла до финального успешного статуса, поле "Бюджет" у неё больше не меняется, и можно
-// надёжно брать сумму прямо оттуда. Так остаётся всего два источника данных (Facebook + amoCRM).
+// или "Полная оплата получена", если задан отдельно). Используется для "Общих продаж" и блока
+// "С рекламы" — вместо чтения Google Таблицы: раз сделка уже дошла до финального успешного
+// статуса, поле "Бюджет" у неё больше не меняется, и можно надёжно брать сумму прямо оттуда.
+//
+// ВАЖНО: фильтруем в запросе к amoCRM ТОЛЬКО по статусу (и воронке) — такой фильтр по
+// стандартным полям обрабатывается быстро, даже при большой базе (100 тыс.+ лидов). Раньше
+// здесь ещё был фильтр по диапазону дат в КАСТОМНОМ поле ("Дата заключения договора") —
+// такие фильтры amoCRM обрабатывает гораздо медленнее и это, похоже, и вызывало таймауты.
+// Сделок с финальным успешным статусом объективно немного по сравнению со всей базой, поэтому
+// дату заключения договора теперь просто проверяем НА СВОЕЙ СТОРОНЕ, уже после получения ответа.
 async function fetchAmoSalesByContractDate(since, until) {
   const {
     AMO_SUBDOMAIN, AMO_ACCESS_TOKEN, AMO_PIPELINE_ID,
@@ -60,13 +65,14 @@ async function fetchAmoSalesByContractDate(since, until) {
     const url = `https://${AMO_SUBDOMAIN}.amocrm.ru/api/v4/leads`;
     const params = {
       'filter[pipeline_id]': AMO_PIPELINE_ID,
-      [`filter[custom_fields_values][${AMO_FIELD_CONTRACT_DATE}][from]`]: sinceTs,
-      [`filter[custom_fields_values][${AMO_FIELD_CONTRACT_DATE}][to]`]: untilTs,
       with: 'custom_fields_values,tags',
       page,
       limit,
     };
     statusIds.forEach((s, i) => { params[`filter[status_id][${i}]`] = s; });
+    if (AMO_FIELD_DEPARTMENT && AMO_FIELD_DEPARTMENT !== '0') {
+      params[`filter[custom_fields_values][${AMO_FIELD_DEPARTMENT}][0]`] = 'Online';
+    }
 
     const resp = await axios.get(url, {
       params,
@@ -81,11 +87,17 @@ async function fetchAmoSalesByContractDate(since, until) {
 
     const pageLeads = (resp.data._embedded && resp.data._embedded.leads) || [];
     if (pageLeads.length === 0) break;
+    console.log(`[amoClient] fetchAmoSalesByContractDate: страница ${page}, получено ${pageLeads.length} сделок`);
 
     for (const lead of pageLeads) {
       const klass = getField(lead, AMO_FIELD_CLASS);
       const department = getField(lead, AMO_FIELD_DEPARTMENT);
       const tagNames = ((lead._embedded && lead._embedded.tags) || []).map((t) => t.name).join(',');
+      const contractDateRaw = getField(lead, AMO_FIELD_CONTRACT_DATE);
+      const contractDate = contractDateRaw ? Number(contractDateRaw) : null;
+
+      // Дату заключения договора проверяем ЗДЕСЬ, на своей стороне — не в запросе к amoCRM.
+      if (!contractDate || contractDate < sinceTs || contractDate > untilTs) continue;
 
       if (AMO_FIELD_DEPARTMENT && AMO_FIELD_DEPARTMENT !== '0') {
         const dep = (department || '').toLowerCase();
@@ -99,7 +111,7 @@ async function fetchAmoSalesByContractDate(since, until) {
         segment: classifySegment(klass, nishClasses, entClasses),
         tags: tagNames,
         fb_ad_name: getField(lead, process.env.AMO_FIELD_FB_AD_NAME),
-        contract_date: getField(lead, AMO_FIELD_CONTRACT_DATE),
+        contract_date: contractDate,
       });
     }
 
@@ -146,6 +158,11 @@ async function fetchAmoLeads(since, until) {
       page,
       limit,
     };
+    // Сужаем поиск ещё на этапе запроса к amoCRM — фильтр по отделу "Online" прямо тут,
+    // а не отбрасываем лишнее уже после того, как всё скачали. Меньше данных — быстрее ответ.
+    if (AMO_FIELD_DEPARTMENT && AMO_FIELD_DEPARTMENT !== '0') {
+      params[`filter[custom_fields_values][${AMO_FIELD_DEPARTMENT}][0]`] = 'Online';
+    }
 
     const resp = await axios.get(url, {
       params,
@@ -160,6 +177,7 @@ async function fetchAmoLeads(since, until) {
 
     const pageLeads = (resp.data._embedded && resp.data._embedded.leads) || [];
     if (pageLeads.length === 0) break;
+    console.log(`[amoClient] fetchAmoLeads: страница ${page}, получено ${pageLeads.length} сделок`);
 
     for (const lead of pageLeads) {
       const klass = getField(lead, AMO_FIELD_CLASS);

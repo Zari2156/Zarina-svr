@@ -28,8 +28,16 @@ function defaultRangeIfMissing(since, until) {
   };
 }
 
+let syncInProgress = false; // защита от одновременного запуска нескольких синхронизаций
+
 async function runSync(sinceIn, untilIn) {
   const { since, until } = defaultRangeIfMissing(sinceIn, untilIn);
+
+  if (syncInProgress) {
+    console.log(`[sync] Пропущено (${since} — ${until}) — уже идёт другая синхронизация`);
+    throw new Error('Синхронизация уже выполняется, подождите её завершения (обычно 1-3 минуты)');
+  }
+  syncInProgress = true;
 
   try {
     // Раньше три запроса шли параллельно (Promise.all), и в логах при зависании было не видно,
@@ -52,19 +60,23 @@ async function runSync(sinceIn, untilIn) {
     const amoSales = await fetchAmoSalesByContractDate(since, until);
     console.log(`[sync] amoCRM (продажи): ${amoSales.length} строк за ${((Date.now() - t0) / 1000).toFixed(1)}с`);
 
-    db.upsertFbInsights(fbRows);
-    db.upsertAmoLeads(amoLeads);
+    t0 = Date.now();
+    await db.upsertFbInsights(fbRows);
+    await db.upsertAmoLeads(amoLeads);
     const sinceTs = Math.floor(new Date(since + 'T00:00:00Z').getTime() / 1000);
     const untilTs = Math.floor(new Date(until + 'T23:59:59Z').getTime() / 1000);
-    db.upsertAmoSales(amoSales.map((s) => ({ ...s, contract_date: s.contract_date || null, synced_at: new Date().toISOString() })));
-    db.logSync({ since, until, fbRows: fbRows.length, amoRows: amoLeads.length, sheetRows: amoSales.length, status: 'ok' });
+    await db.upsertAmoSales(amoSales.map((s) => ({ ...s, contract_date: s.contract_date || null, synced_at: new Date().toISOString() })));
+    await db.logSync({ since, until, fbRows: fbRows.length, amoRows: amoLeads.length, sheetRows: amoSales.length, status: 'ok' });
+    console.log(`[sync] Запись в БД: за ${((Date.now() - t0) / 1000).toFixed(1)}с`);
 
     console.log(`[sync] OK (${since} — ${until}): FB ${fbRows.length}, amoCRM сделки ${amoLeads.length}, amoCRM продажи ${amoSales.length}`);
     return { since, until, fbRows: fbRows.length, amoRows: amoLeads.length, sheetRows: amoSales.length };
   } catch (err) {
-    db.logSync({ since, until, status: 'error', error: err.message });
+    await db.logSync({ since, until, status: 'error', error: err.message }).catch(() => {});
     console.error('[sync] ОШИБКА:', err.message);
     throw err;
+  } finally {
+    syncInProgress = false;
   }
 }
 
@@ -160,12 +172,12 @@ function buildSegmentReport(segment, since, until, fbRows, amoLeads, amoSalesRow
   return { segment, rows, totals, adsBlock, generalSales, recommendations: buildRecommendations(rows) };
 }
 
-function buildJoinedReport(since, until) {
-  const fbRows = db.getFbInsightsInRange(since, until);
-  const amoLeads = db.getAmoLeadsInRange(since, until);
+async function buildJoinedReport(since, until) {
+  const fbRows = await db.getFbInsightsInRange(since, until);
+  const amoLeads = await db.getAmoLeadsInRange(since, until);
   const sinceTs = Math.floor(new Date(since + 'T00:00:00Z').getTime() / 1000);
   const untilTs = Math.floor(new Date(until + 'T23:59:59Z').getTime() / 1000);
-  const amoSalesRows = db.getAmoSalesInRange(sinceTs, untilTs);
+  const amoSalesRows = await db.getAmoSalesInRange(sinceTs, untilTs);
 
   const adsTagsNish = (process.env.ADS_TAGS_NISH || '').split(',').map((t) => t.trim()).filter(Boolean);
   const adsTagsEnt = (process.env.ADS_TAGS_ENT || '').split(',').map((t) => t.trim()).filter(Boolean);
@@ -188,7 +200,7 @@ function buildJoinedReport(since, until) {
     sampleFbRow: fbRows[0] || null,
   };
 
-  return { since, until, nish, ent, lastSync: db.getLastSync(), debug };
+  return { since, until, nish, ent, lastSync: await db.getLastSync(), debug };
 }
 
 module.exports = { runSync, buildJoinedReport };

@@ -3,6 +3,9 @@ const express = require('express');
 const cors = require('cors');
 const cron = require('node-cron');
 const path = require('path');
+const session = require('express-session');
+const bcrypt = require('bcryptjs');
+const rateLimit = require('express-rate-limit');
 
 const { runSync, buildJoinedReport } = require('./src/sync');
 const { fetchAmoMeta, fetchLeadDebug } = require('./src/amoClient');
@@ -10,7 +13,88 @@ const { fetchAmoMeta, fetchLeadDebug } = require('./src/amoClient');
 const app = express();
 app.use(cors());
 app.use(express.json());
+app.use(express.urlencoded({ extended: false })); // для формы логина
+
+// --- Авторизация ---------------------------------------------------------------------------
+// Дэшборд показывает финансовые данные компании, поэтому весь сайт (страница + все /api/...)
+// закрыт логином/паролем. Логин и хеш пароля берутся из .env (ADMIN_USERNAME, ADMIN_PASSWORD_HASH
+// — именно ХЕШ, не сам пароль открытым текстом). SESSION_SECRET — длинная случайная строка в .env.
+if (!process.env.SESSION_SECRET) {
+  throw new Error('SESSION_SECRET не задан в .env — нужна длинная случайная строка для подписи сессии');
+}
+if (!process.env.ADMIN_USERNAME || !process.env.ADMIN_PASSWORD_HASH) {
+  throw new Error('ADMIN_USERNAME / ADMIN_PASSWORD_HASH не заданы в .env — вход по паролю не настроен');
+}
+
+// SESSION_SECURE_COOKIE=false нужно ТОЛЬКО во время разработки через SSH-туннель (там адрес
+// http://127.0.0.1..., без HTTPS) — на боевом адресе за nginx с HTTPS должно быть true (по умолчанию).
+app.use(session({
+  secret: process.env.SESSION_SECRET,
+  resave: false,
+  saveUninitialized: false,
+  cookie: {
+    httpOnly: true,
+    secure: process.env.SESSION_SECURE_COOKIE !== 'false',
+    sameSite: 'lax',
+    maxAge: 1000 * 60 * 60 * 24 * 7, // неделя
+  },
+}));
+
+const loginLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 8, // не больше 8 попыток входа в минуту с одного адреса
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Слишком много попыток входа, подождите минуту' },
+});
+
+app.post('/login', loginLimiter, async (req, res) => {
+  const { username, password } = req.body;
+  const validUser = username === process.env.ADMIN_USERNAME;
+  const validPass = validUser && await bcrypt.compare(password || '', process.env.ADMIN_PASSWORD_HASH);
+  if (!validUser || !validPass) {
+    return res.status(401).send(loginPage('Неверный логин или пароль'));
+  }
+  req.session.authed = true;
+  res.redirect('/');
+});
+
+app.get('/logout', (req, res) => {
+  req.session.destroy(() => res.redirect('/login'));
+});
+
+function loginPage(error) {
+  return `<!doctype html><html><head><meta charset="utf-8"><title>Вход</title>
+    <style>
+      body{font-family:sans-serif;background:#0B0E14;color:#fff;display:flex;align-items:center;justify-content:center;height:100vh;margin:0}
+      form{background:#151922;padding:32px;border-radius:12px;width:280px}
+      input{width:100%;padding:10px;margin:8px 0;border-radius:6px;border:1px solid #333;background:#0B0E14;color:#fff;box-sizing:border-box}
+      button{width:100%;padding:10px;border-radius:6px;border:none;background:#6C5CE7;color:#fff;cursor:pointer;margin-top:8px}
+      .err{color:#ff6b6b;font-size:14px;margin-bottom:8px}
+    </style></head><body>
+    <form method="POST" action="/login">
+      <h2>Вход</h2>
+      ${error ? `<div class="err">${error}</div>` : ''}
+      <input name="username" placeholder="Логин" autofocus required />
+      <input name="password" type="password" placeholder="Пароль" required />
+      <button type="submit">Войти</button>
+    </form>
+    </body></html>`;
+}
+
+app.get('/login', (req, res) => res.send(loginPage()));
+
+// Всё остальное — только после входа. Для /api/... отдаём 401 (не редирект — это же не страница,
+// её открывает сам дэшборд через fetch, а не человек глазами).
+function requireAuth(req, res, next) {
+  if (req.session && req.session.authed) return next();
+  if (req.path.startsWith('/api/')) return res.status(401).json({ error: 'Требуется вход' });
+  return res.redirect('/login');
+}
+app.use(requireAuth);
+
 app.use(express.static(path.join(__dirname, 'public')));
+// --------------------------------------------------------------------------------------------
 
 function defaultRange() {
   const today = new Date();
@@ -20,12 +104,12 @@ function defaultRange() {
 }
 
 // Основной эндпоинт — данные для дэшборда за период (?since=2026-09-01&until=2026-09-09)
-app.get('/api/dashboard', (req, res) => {
+app.get('/api/dashboard', async (req, res) => {
   try {
     const def = defaultRange();
     const since = req.query.since || def.since;
     const until = req.query.until || def.until;
-    const report = buildJoinedReport(since, until);
+    const report = await buildJoinedReport(since, until);
     res.json(report);
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -109,16 +193,17 @@ app.get('/api/lead-debug/:id', async (req, res) => {
   }
 });
 
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  console.log(`Сервис запущен: http://localhost:${PORT}`);
+const PORT = process.env.PORT || 3100;
+const HOST = process.env.HOST || '127.0.0.1';
+app.listen(PORT, HOST, () => {
+  console.log(`Сервис запущен: http://${HOST}:${PORT}`);
 
   if (process.env.RUN_CRON === 'true') {
     const schedule = process.env.CRON_SCHEDULE || '0 6 * * *';
     cron.schedule(schedule, () => {
       console.log('[cron] Запуск плановой синхронизации');
       runSync().catch(() => {});
-    });
-    console.log(`[cron] Автосинхронизация включена: "${schedule}"`);
+    }, { timezone: 'Asia/Almaty' });
+    console.log(`[cron] Автосинхронизация включена: "${schedule}" (Asia/Almaty)`);
   }
 });
