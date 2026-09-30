@@ -282,3 +282,7 @@ tr:last-child td { border-bottom: none; }
   .totals { grid-template-columns: repeat(2, 1fr); }
   .content { grid-template-columns: 1fr; }
 }
+
+/* Заголовок верхнего блока и одиночный нижний блок */
+.block-title { font-size: 15px; font-weight: 600; color: var(--text-muted, #8B94A7); margin: 0 0 10px; }
+.content--single { grid-template-columns: 1fr !important; }

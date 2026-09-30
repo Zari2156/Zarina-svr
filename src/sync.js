@@ -1,5 +1,6 @@
 const { fetchFacebookInsights } = require('./facebookClient');
-const { fetchAmoLeads, fetchAmoSalesByContractDate } = require('./amoClient');
+const { fetchAmoLeads, fetchAmoSalesByContractDate, fetchPipelineStatuses, fetchReachedQualIds } = require('./amoClient');
+const { toTs, segmentByTags } = require('./rules');
 const db = require('./db');
 const { buildRecommendations } = require('./recommendations');
 
@@ -15,6 +16,16 @@ function getAdsTags() {
 // считались одним и тем же объявлением.
 function normalizeName(str) {
   return (str || '').toString().trim().toLowerCase().replace(/\s+/g, ' ');
+}
+
+// Этапы, которые считаются "квалом": "Квалификация пройдена" (AMO_STATUS_QUALIFIED) и ВСЕ этапы
+// после неё по порядку воронки, включая "Успешно реализовано" (142). Кроме "Закрыто и не
+// реализовано" (143) — такие сделки считаются квалом, только если по истории доходили до квала.
+function qualifyingStatusIds(statuses) {
+  const qualId = Number(process.env.AMO_STATUS_QUALIFIED);
+  const qual = (statuses || []).find((st) => Number(st.id) === qualId);
+  if (!qual) return qualId ? [qualId] : [];
+  return statuses.filter((st) => st.sort >= qual.sort && Number(st.id) !== 143).map((st) => Number(st.id));
 }
 
 function defaultRangeIfMissing(since, until) {
@@ -60,11 +71,29 @@ async function runSync(sinceIn, untilIn) {
     const amoSales = await fetchAmoSalesByContractDate(since, until);
     console.log(`[sync] amoCRM (продажи): ${amoSales.length} строк за ${((Date.now() - t0) / 1000).toFixed(1)}с`);
 
+    // Этапы воронки и история: какие сделки доходили до квалификации (для подсчёта квалов как в amoCRM).
+    // Если этот шаг не получится — синхронизация не падает, квалы считаются по текущему этапу.
+    t0 = Date.now();
+    try {
+      const statuses = await fetchPipelineStatuses();
+      await db.setKv('pipeline_statuses', statuses);
+      const qualIds = qualifyingStatusIds(statuses);
+      const qualStatus = statuses.find((st) => Number(st.id) === Number(process.env.AMO_STATUS_QUALIFIED));
+      console.log(`[sync] Этап квала: ${qualStatus ? qualStatus.name : 'НЕ НАЙДЕН (проверьте AMO_STATUS_QUALIFIED)'}; этапов, считающихся квалом: ${qualIds.length}`);
+      if (qualIds.length) {
+        const reached = await fetchReachedQualIds(toTs(since), qualIds);
+        if (reached) {
+          await db.addReachedQual(reached);
+          console.log(`[sync] История квалов: ${reached.length} сделок за ${((Date.now() - t0) / 1000).toFixed(1)}с`);
+        }
+      }
+    } catch (e) {
+      console.warn('[sync] Этапы/история квалов не получены:', e.message);
+    }
+
     t0 = Date.now();
     await db.upsertFbInsights(fbRows);
     await db.upsertAmoLeads(amoLeads);
-    const sinceTs = Math.floor(new Date(since + 'T00:00:00Z').getTime() / 1000);
-    const untilTs = Math.floor(new Date(until + 'T23:59:59Z').getTime() / 1000);
     await db.upsertAmoSales(amoSales.map((s) => ({ ...s, contract_date: s.contract_date || null, synced_at: new Date().toISOString() })));
     // Сделки, которые сейчас не в отделе Online, убираем из базы — чтобы переведённые в офлайн не считались.
     const offlineIds = [...new Set([...(amoLeads.excludedIds || []), ...(amoSales.excludedIds || [])])];
@@ -87,127 +116,100 @@ async function runSync(sinceIn, untilIn) {
   }
 }
 
-// Строит один сегмент (НИШ или ЕНТ): джойн Facebook+amoCRM по ad_id/названию + блок "с рекламы"
-// по тегам + общие продажи. Все данные — из двух источников: Facebook и amoCRM (Google Таблица
-// больше не используется).
-// "Лид" — сделка СОЗДАНА в выбранном периоде. "Квал" — на момент синхронизации текущий статус
-// сделки равен статусу "Квалификация пройдена". "Продажа"/"Выручка" — сделки со статусом
-// "Успешно реализовано", попавшие в период по ДАТЕ ЗАКЛЮЧЕНИЯ ДОГОВОРА (amoSalesRows).
-function buildSegmentReport(segment, since, until, fbRows, amoLeads, amoSalesRows, adsTags) {
+// ===================== ОТЧЁТ ДЛЯ ДАШБОРДА =====================
+// Правила подсчёта (как в amoCRM):
+// - Везде только отдел Online (остальные отделы в базу не попадают).
+// - Лиды = сделки, СОЗДАННЫЕ в выбранном периоде (даты по времени Алматы).
+// - Квал = сделка дошла до этапа "Квалификация пройдена" или любого этапа после него
+//   (включая закрытые позже как "не реализовано", если по истории они доходили до квала).
+// - Продажа/выручка = сделки с ДАТОЙ ЗАКЛЮЧЕНИЯ ДОГОВОРА в периоде (даже если сделка создана
+//   в прошлых месяцах) на этапе "Полная оплата получена" / "Успешно реализовано". Выручка — бюджет сделки.
+// - Верхний блок и таблица = ТОЛЬКО реклама: сделки с тегами НИШ (ADS_TAGS_NISH) или ЕНТ
+//   (ADS_TAGS_ENT). Поле "Класс" не используется.
+// - Нижний блок "Все онлайн" = все онлайн-сделки и продажи, из любых источников.
+
+function sumPrice(list) {
+  return list.reduce((sum, x) => sum + (x.price || 0), 0);
+}
+
+function buildSegmentReport(segment, fbRows, segLeads, segSales, isQual, rate) {
   const fbSeg = fbRows.filter((r) => r.segment === segment);
-  const amoSeg = amoLeads.filter((r) => r.segment === segment);
-  const salesSeg = amoSalesRows.filter((r) => r.segment === segment);
 
-  const hasAdsTag = (tagsStr, list) => (tagsStr || '').split(',').map((t) => t.trim()).some((t) => list.includes(t));
-
-  // --- Джойн по объявлениям (детализация по каждому креативу) ---
+  // --- Таблица по объявлениям ---
   const rows = fbSeg.map((fb) => {
     const fbAdNameNorm = normalizeName(fb.ad_name);
-    // Сопоставление с amoCRM нужно ТОЛЬКО для квалов (Facebook не знает о квалификации) —
-    // сначала пробуем по ad_id (если он вообще у кого-то заполнен), иначе по названию объявления
-    // (FB_AD_NAME из amoCRM, приходит через Zapier-интеграцию с Facebook).
-    let related = amoSeg.filter((l) => l.ad_id && String(l.ad_id) === String(fb.ad_id));
+    let related = segLeads.filter((l) => l.ad_id && String(l.ad_id) === String(fb.ad_id));
     if (related.length === 0 && fbAdNameNorm) {
-      related = amoSeg.filter((l) => l.fb_ad_name && normalizeName(l.fb_ad_name) === fbAdNameNorm);
+      related = segLeads.filter((l) => l.fb_ad_name && normalizeName(l.fb_ad_name) === fbAdNameNorm);
     }
-    // "Лиды" на объявление — берём НЕ из amoCRM (связка может быть неполной), а готовой цифрой
-    // прямо из Facebook (fb_leads) — там это уже посчитано точно средствами самого Facebook.
-    const leads = fb.fb_leads || 0;
-    const qualified = related.filter((l) => l.is_qualified).length;
-    // Продажи/выручка по объявлению — сделки из amoSales (уже отфильтрованы по статусу
-    // "Успешно реализовано" и дате заключения договора), сматченные по названию объявления.
-    const adSales = salesSeg.filter((s) => s.fb_ad_name && normalizeName(s.fb_ad_name) === fbAdNameNorm);
-    const revenue = adSales.reduce((sum, s) => sum + (s.price || 0), 0);
+    const leads = fb.fb_leads || 0; // лиды по объявлению — из самого Facebook
+    const qualified = related.filter(isQual).length;
+    const adSales = segSales.filter((x) => x.fb_ad_name && normalizeName(x.fb_ad_name) === fbAdNameNorm);
+    const revenue = sumPrice(adSales);
     const sales = adSales.length;
-
-    const cpl = leads > 0 ? fb.spend / leads : null;
-    const cpql = qualified > 0 ? fb.spend / qualified : null;
-    const cac = sales > 0 ? fb.spend / sales : null;
-    const convRate = leads > 0 ? sales / leads : null;
-    const percentQualified = leads > 0 ? (qualified / leads) * 100 : null;
-    const roas = fb.spend > 0 ? revenue / fb.spend : null;
-
     return {
       ad_id: fb.ad_id, ad_name: fb.ad_name, adset_name: fb.adset_name, campaign_name: fb.campaign_name,
       spend: fb.spend, impressions: fb.impressions,
       ctr: fb.impressions > 0 ? (fb.clicks / fb.impressions) * 100 : 0,
-      leads, qualified, sales, revenue, cpl, cpql, cac, convRate, percentQualified, roas,
+      leads, qualified, sales, revenue,
+      cpl: leads > 0 ? fb.spend / leads : null,
+      cpql: qualified > 0 ? fb.spend / qualified : null,
+      cac: sales > 0 ? fb.spend / sales : null,
+      convRate: leads > 0 ? sales / leads : null,
+      percentQualified: leads > 0 ? (qualified / leads) * 100 : null,
+      roas: fb.spend > 0 ? revenue / (fb.spend * rate) : null,
     };
   });
 
-  // --- Блок "С рекламы" (считаем ДО totals, т.к. totals берёт из него продажи/выручку) ---
-  const adsLeads = amoSeg.filter((l) => hasAdsTag(l.tags, adsTags));
-  const adsQualifiedCount = adsLeads.filter((l) => l.is_qualified).length;
-  // sales / revenue — сделки из amoSales (успешные, по дате заключения договора) с рекламным тегом.
-  const adsPayments = salesSeg.filter((s) => hasAdsTag(s.tags, adsTags));
-  const adsBlock = {
-    leads: adsLeads.length,
-    qualified: adsQualifiedCount,
-    percentQualified: adsLeads.length > 0 ? (adsQualifiedCount / adsLeads.length) * 100 : null,
-    sales: adsPayments.length,
-    revenue: adsPayments.reduce((sum, s) => sum + (s.price || 0), 0),
-  };
-
-  // Итоги сегмента: leads/qualified — по ВСЕМ сделкам сегмента за период (не зависит от ad_id).
-  // sales/revenue — из adsBlock (надёжный источник, см. выше), а НЕ суммой строк-объявлений —
-  // та сумма верна только если у сделок стоит ad_id, что бывает не всегда.
-  const totalSpend = fbSeg.reduce((sum, r) => sum + r.spend, 0);
-  const totalQualified = amoSeg.filter((l) => l.is_qualified).length;
+  // --- Верхний блок: только реклама (по тегам сегмента) ---
+  const spend = fbSeg.reduce((sum, r) => sum + (r.spend || 0), 0);
+  const qualified = segLeads.filter(isQual).length;
   const totals = {
-    spend: totalSpend,
-    leads: amoSeg.length,
-    qualified: totalQualified,
-    sales: adsBlock.sales,
-    revenue: adsBlock.revenue,
+    spend,
+    leads: segLeads.length,
+    qualified,
+    sales: segSales.length,
+    revenue: sumPrice(segSales),
   };
-  totals.cpl = totals.leads > 0 ? totals.spend / totals.leads : null;
-  totals.cpql = totals.qualified > 0 ? totals.spend / totals.qualified : null;
-  totals.cac = totals.sales > 0 ? totals.spend / totals.sales : null;
-  totals.percentQualified = totals.leads > 0 ? (totals.qualified / totals.leads) * 100 : null;
-  totals.roas = totals.spend > 0 ? totals.revenue / totals.spend : null;
+  totals.cpl = totals.leads > 0 ? spend / totals.leads : null;
+  totals.cpql = qualified > 0 ? spend / qualified : null;
+  totals.cac = totals.sales > 0 ? spend / totals.sales : null;
+  totals.percentQualified = totals.leads > 0 ? (qualified / totals.leads) * 100 : null;
+  totals.roas = spend > 0 ? totals.revenue / (spend * rate) : null;
 
-  // --- Общие продажи (все источники) ---
-  // Считаем ПО ВСЕМ сделкам сегмента (Online + класс НИШ/ЕНТ), дошедшим до успешной оплаты в
-  // периоде — не только с рекламы. Разбивку "новые/повторные" убрали вместе с Google Таблицей —
-  // amoCRM в этом разрезе такого деления не даёт; если нужно будет вернуть, обсудим отдельно.
-  const generalSales = {
-    total: salesSeg.reduce((sum, s) => sum + (s.price || 0), 0),
-    count: salesSeg.length,
-    qualified: totalQualified,
-  };
-
-  return { segment, rows, totals, adsBlock, generalSales, recommendations: buildRecommendations(rows) };
+  return { segment, rows, totals, recommendations: buildRecommendations(rows) };
 }
 
 async function buildJoinedReport(since, until) {
+  const sinceTs = toTs(since);
+  const untilTs = toTs(until, true);
   const fbRows = await db.getFbInsightsInRange(since, until);
-  const amoLeads = await db.getAmoLeadsInRange(since, until);
-  const sinceTs = Math.floor(new Date(since + 'T00:00:00Z').getTime() / 1000);
-  const untilTs = Math.floor(new Date(until + 'T23:59:59Z').getTime() / 1000);
-  const amoSalesRows = await db.getAmoSalesInRange(sinceTs, untilTs);
+  const leads = await db.getAmoLeadsCreatedInRange(sinceTs, untilTs);
+  const sales = await db.getAmoSalesInRange(sinceTs, untilTs);
 
-  const adsTagsNish = (process.env.ADS_TAGS_NISH || '').split(',').map((t) => t.trim()).filter(Boolean);
-  const adsTagsEnt = (process.env.ADS_TAGS_ENT || '').split(',').map((t) => t.trim()).filter(Boolean);
+  const statuses = (await db.getKv('pipeline_statuses')) || [];
+  const qualStatusSet = new Set(qualifyingStatusIds(statuses));
+  const reached = await db.getReachedQualSet();
+  const isQual = (l) => qualStatusSet.has(Number(l.status_id)) || reached.has(Number(l.id)) || Number(l.is_qualified) === 1;
 
-  const nish = buildSegmentReport('nish', since, until, fbRows, amoLeads, amoSalesRows, adsTagsNish);
-  const ent = buildSegmentReport('ent', since, until, fbRows, amoLeads, amoSalesRows, adsTagsEnt);
+  // Курс для ROAS, если расход Facebook в другой валюте, чем выручка (например, $ -> ₸).
+  const rate = Number(process.env.SPEND_TO_REVENUE_RATE || 1) || 1;
 
-  // ВРЕМЕННАЯ ДИАГНОСТИКА: показывает, как распределились сделки/объявления по сегментам,
-  // чтобы понять, почему НИШ/ЕНТ могут быть пустыми.
-  const debug = {
-    totalAmoLeadsInRange: amoLeads.length,
-    amoNish: amoLeads.filter((l) => l.segment === 'nish').length,
-    amoEnt: amoLeads.filter((l) => l.segment === 'ent').length,
-    amoNoSegment: amoLeads.filter((l) => !l.segment).length,
-    sampleAmoLead: amoLeads[0] || null,
-    totalFbRowsInRange: fbRows.length,
-    fbNish: fbRows.filter((r) => r.segment === 'nish').length,
-    fbEnt: fbRows.filter((r) => r.segment === 'ent').length,
-    fbNoSegment: fbRows.filter((r) => !r.segment).length,
-    sampleFbRow: fbRows[0] || null,
+  const segOf = (x) => segmentByTags(x.tags);
+  const nish = buildSegmentReport('nish', fbRows, leads.filter((l) => segOf(l) === 'nish'), sales.filter((x) => segOf(x) === 'nish'), isQual, rate);
+  const ent = buildSegmentReport('ent', fbRows, leads.filter((l) => segOf(l) === 'ent'), sales.filter((x) => segOf(x) === 'ent'), isQual, rate);
+
+  // --- Нижний блок: все онлайн-сделки и продажи (любые источники) ---
+  const allQual = leads.filter(isQual).length;
+  const general = {
+    leads: leads.length,
+    qualified: allQual,
+    percentQualified: leads.length > 0 ? (allQual / leads.length) * 100 : null,
+    sales: sales.length,
+    revenue: sumPrice(sales),
   };
 
-  return { since, until, nish, ent, lastSync: await db.getLastSync(), debug };
+  return { since, until, nish, ent, general, lastSync: await db.getLastSync() };
 }
 
 module.exports = { runSync, buildJoinedReport };

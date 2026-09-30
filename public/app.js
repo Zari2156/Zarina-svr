@@ -41,8 +41,7 @@ function render() {
   renderTotals(seg.totals);
   renderTable(seg.rows);
   renderRecommendations(seg.recommendations);
-  renderAdsTagsBlock(seg.adsBlock);
-  renderGeneralSalesBlock(seg.generalSales);
+  renderGeneralSalesBlock(currentReport.general);
   renderChart(seg.rows);
 }
 
@@ -95,23 +94,14 @@ function renderRecommendations(recs) {
   }).join('');
 }
 
-function renderAdsTagsBlock(block) {
+function renderGeneralSalesBlock(block) {
   if (!block) return;
-  document.getElementById('adsTagsBlock').innerHTML = [
-    { label: 'Лиды с рекламы (по тегам)', value: fmt(block.leads) },
+  document.getElementById('generalSalesBlock').innerHTML = [
+    { label: 'Лиды (все онлайн)', value: fmt(block.leads) },
     { label: 'Квалы', value: fmt(block.qualified) },
     { label: '% квалификации', value: fmtPct(block.percentQualified) },
     { label: 'Продажи', value: fmt(block.sales) },
     { label: 'Выручка', value: fmt(block.revenue) },
-  ].map(c => `<div class="mini-stat"><div class="mini-stat__label">${c.label}</div><div class="mini-stat__value">${c.value}</div></div>`).join('');
-}
-
-function renderGeneralSalesBlock(block) {
-  if (!block) return;
-  document.getElementById('generalSalesBlock').innerHTML = [
-    { label: 'Всего продаж (сумма)', value: fmt(block.total) },
-    { label: 'Кол-во сделок', value: fmt(block.count) },
-    { label: 'Квал. лидов (весь сегмент)', value: fmt(block.qualified) },
   ].map(c => `<div class="mini-stat"><div class="mini-stat__label">${c.label}</div><div class="mini-stat__value">${c.value}</div></div>`).join('');
 }
 

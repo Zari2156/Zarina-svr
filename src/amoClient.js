@@ -1,4 +1,5 @@
 const axios = require('axios');
+const { toTs, segmentByTags } = require('./rules');
 
 function getField(lead, fieldId) {
   if (!fieldId || fieldId === '0') return null;
@@ -54,8 +55,8 @@ async function fetchAmoSalesByContractDate(since, until) {
   const successStatus = AMO_STATUS_SUCCESS || AMO_STATUS_WON;
   const statusIds = [successStatus, AMO_STATUS_FULL_PAYMENT].filter(Boolean);
 
-  const sinceTs = Math.floor(new Date(since + 'T00:00:00Z').getTime() / 1000);
-  const untilTs = Math.floor(new Date(until + 'T23:59:59Z').getTime() / 1000);
+  const sinceTs = toTs(since);          // начало дня по Алматы
+  const untilTs = toTs(until, true);     // конец дня по Алматы
 
   const leads = [];
   const excludedIds = []; // сделки не из отдела Online — их убираем из базы
@@ -118,7 +119,7 @@ async function fetchAmoSalesByContractDate(since, until) {
         id: lead.id,
         price: lead.price || 0,
         klass,
-        segment: classifySegment(klass, nishClasses, entClasses),
+        segment: segmentByTags(tagNames), // НИШ/ЕНТ — только по рекламным тегам, без поля "Класс"
         tags: tagNames,
         fb_ad_name: getField(lead, process.env.AMO_FIELD_FB_AD_NAME),
         contract_date: contractDate,
@@ -129,9 +130,10 @@ async function fetchAmoSalesByContractDate(since, until) {
     page++;
   }
 
-  const result = leads.filter((l) => l.segment !== null);
-  result.excludedIds = excludedIds;
-  return result;
+  // Отдаём ВСЕ онлайн-продажи: с рекламными тегами идут в блок "С рекламы",
+  // а все вместе — в "Общие продажи".
+  leads.excludedIds = excludedIds;
+  return leads;
 }
 
 async function fetchAmoLeads(since, until) {
@@ -153,8 +155,8 @@ async function fetchAmoLeads(since, until) {
   // Если статус "успешно реализовано" отдельно не задан — используем старый AMO_STATUS_WON для совместимости
   const successStatus = AMO_STATUS_SUCCESS || AMO_STATUS_WON;
 
-  const sinceTs = Math.floor(new Date(since + 'T00:00:00Z').getTime() / 1000);
-  const untilTs = Math.floor(new Date(until + 'T23:59:59Z').getTime() / 1000);
+  const sinceTs = toTs(since);          // начало дня по Алматы
+  const untilTs = toTs(until, true);     // конец дня по Алматы
 
   const leads = [];
   const excludedIds = []; // сделки не из отдела Online — их убираем из базы
@@ -217,7 +219,7 @@ async function fetchAmoLeads(since, until) {
         fb_adset_name: getField(lead, AMO_FIELD_FB_ADSET_NAME),
         fb_ad_name: getField(lead, AMO_FIELD_FB_AD_NAME),
         klass,
-        segment: classifySegment(klass, nishClasses, entClasses),
+        segment: segmentByTags(tagNames), // НИШ/ЕНТ — только по рекламным тегам, без поля "Класс"
         department: getField(lead, AMO_FIELD_DEPARTMENT),
         tags: tagNames,
         // Квал засчитывается, если ЛИБО текущий статус сделки = "Квалификация пройдена",
@@ -412,4 +414,54 @@ async function fetchLeadDebug(leadId) {
   };
 }
 
-module.exports = { fetchAmoLeads, fetchAmoLeadsByIds, fetchAmoSalesByContractDate, fetchStatusChangeDates, fetchAmoMeta, fetchLeadDebug };
+// Этапы воронки (id, название, порядок). Нужны, чтобы считать квалы как в отчёте amoCRM:
+// квал = сделка ДОШЛА до этапа "Квалификация пройдена" или любого этапа ПОСЛЕ него.
+async function fetchPipelineStatuses() {
+  const { AMO_SUBDOMAIN, AMO_ACCESS_TOKEN, AMO_PIPELINE_ID } = process.env;
+  const resp = await axios.get(`https://${AMO_SUBDOMAIN}.amocrm.ru/api/v4/leads/pipelines/${AMO_PIPELINE_ID}`, {
+    headers: { Authorization: `Bearer ${AMO_ACCESS_TOKEN}` }, validateStatus: () => true, timeout: 60000,
+  });
+  if (resp.status >= 400) throw new Error(`amoCRM API error (${resp.status}): ${JSON.stringify(resp.data)}`);
+  return ((resp.data._embedded && resp.data._embedded.statuses) || [])
+    .map((st) => ({ id: st.id, name: st.name, sort: st.sort }))
+    .sort((a, b) => a.sort - b.sort);
+}
+
+// ID сделок, которые с момента sinceTs хотя бы раз ПЕРЕХОДИЛИ на этап квалификации или дальше.
+// Нужно для сделок, которые потом закрыли как "Закрыто и не реализовано": по текущему этапу
+// их уже не видно, а в отчёте amoCRM они считаются как прошедшие квалификацию.
+// Если amoCRM не примет запрос — возвращаем null, и синхронизация НЕ падает.
+async function fetchReachedQualIds(sinceTs, qualStatusIds) {
+  const { AMO_SUBDOMAIN, AMO_ACCESS_TOKEN, AMO_PIPELINE_ID } = process.env;
+  const ids = new Set();
+  let page = 1;
+  while (true) {
+    const params = {
+      'filter[type]': 'lead_status_changed',
+      'filter[entity]': 'lead',
+      'filter[created_at][from]': sinceTs,
+      page,
+      limit: 100,
+    };
+    qualStatusIds.forEach((sid, i) => {
+      params[`filter[value_after][leads_statuses][${i}][pipeline_id]`] = AMO_PIPELINE_ID;
+      params[`filter[value_after][leads_statuses][${i}][status_id]`] = sid;
+    });
+    const resp = await axios.get(`https://${AMO_SUBDOMAIN}.amocrm.ru/api/v4/events`, {
+      params, headers: { Authorization: `Bearer ${AMO_ACCESS_TOKEN}` }, validateStatus: () => true, timeout: 60000,
+    });
+    if (resp.status === 204) break;
+    if (resp.status >= 400) {
+      console.warn(`[amoClient] История этапов недоступна (${resp.status}) — квалы по закрытым сделкам не учтены: ${JSON.stringify(resp.data).slice(0, 200)}`);
+      return null;
+    }
+    const events = (resp.data._embedded && resp.data._embedded.events) || [];
+    if (events.length === 0) break;
+    events.forEach((ev) => ids.add(Number(ev.entity_id)));
+    if (events.length < 100) break;
+    page++;
+  }
+  return [...ids];
+}
+
+module.exports = { fetchPipelineStatuses, fetchReachedQualIds, fetchAmoLeads, fetchAmoLeadsByIds, fetchAmoSalesByContractDate, fetchStatusChangeDates, fetchAmoMeta, fetchLeadDebug };

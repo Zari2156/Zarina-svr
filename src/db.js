@@ -85,6 +85,17 @@ CREATE TABLE IF NOT EXISTS amo_sales (
   synced_at TEXT
 );
 
+-- Сделки, которые хоть раз доходили до этапа квалификации или дальше (из истории amoCRM).
+CREATE TABLE IF NOT EXISTS amo_reached_qual (
+  id INTEGER PRIMARY KEY
+);
+
+-- Простые настройки/справочники (например, этапы воронки).
+CREATE TABLE IF NOT EXISTS kv (
+  k TEXT PRIMARY KEY,
+  v TEXT
+);
+
 CREATE TABLE IF NOT EXISTS sync_log (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   ran_at TEXT,
@@ -198,6 +209,26 @@ function deleteByIds(table, ids) {
 async function deleteAmoLeadsByIds(ids) { return deleteByIds('amo_leads', ids); }
 async function deleteAmoSalesByIds(ids) { return deleteByIds('amo_sales', ids); }
 
+async function addReachedQual(ids) {
+  if (!ids || ids.length === 0) return;
+  const stmt = db.prepare('INSERT OR IGNORE INTO amo_reached_qual (id) VALUES (?)');
+  db.transaction((list) => { for (const id of list) stmt.run(id); })(ids);
+}
+async function getReachedQualSet() {
+  return new Set(db.prepare('SELECT id FROM amo_reached_qual').all().map((r) => r.id));
+}
+async function setKv(k, value) {
+  db.prepare('INSERT INTO kv (k, v) VALUES (?, ?) ON CONFLICT(k) DO UPDATE SET v = excluded.v').run(k, JSON.stringify(value));
+}
+async function getKv(k) {
+  const row = db.prepare('SELECT v FROM kv WHERE k = ?').get(k);
+  return row ? JSON.parse(row.v) : null;
+}
+// Сделки, СОЗДАННЫЕ в периоде (границы — unix-время, уже с учётом часового пояса Алматы).
+async function getAmoLeadsCreatedInRange(sinceTs, untilTs) {
+  return db.prepare('SELECT * FROM amo_leads WHERE created_at BETWEEN ? AND ?').all(sinceTs, untilTs);
+}
+
 async function logSync({ since, until, fbRows, amoRows, sheetRows, status, error }) {
   db.prepare(`
     INSERT INTO sync_log (ran_at, since, until, fb_rows, amo_rows, sheet_rows, status, error)
@@ -253,5 +284,6 @@ async function getLastSync() {
 module.exports = {
   upsertFbInsights, upsertAmoLeads, upsertGeneralSales, upsertAmoSales, logSync,
   deleteAmoLeadsByIds, deleteAmoSalesByIds,
+  addReachedQual, getReachedQualSet, setKv, getKv, getAmoLeadsCreatedInRange,
   getFbInsightsInRange, getAmoLeadsInRange, getGeneralSalesInRange, getAmoSalesInRange, getAdsFlagsByIds, getLastSync,
 };
