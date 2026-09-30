@@ -186,6 +186,18 @@ async function upsertAmoSales(rows) {
   insertMany(rows);
 }
 
+// Удаляет из базы сделки, которые больше не относятся к отделу Online
+// (например, клиент оставил заявку онлайн, а потом его перевели в офлайн).
+function deleteByIds(table, ids) {
+  if (!ids || ids.length === 0) return 0;
+  const stmt = db.prepare(`DELETE FROM ${table} WHERE id = ?`);
+  let removed = 0;
+  db.transaction((list) => { for (const id of list) removed += stmt.run(id).changes; })(ids);
+  return removed;
+}
+async function deleteAmoLeadsByIds(ids) { return deleteByIds('amo_leads', ids); }
+async function deleteAmoSalesByIds(ids) { return deleteByIds('amo_sales', ids); }
+
 async function logSync({ since, until, fbRows, amoRows, sheetRows, status, error }) {
   db.prepare(`
     INSERT INTO sync_log (ran_at, since, until, fb_rows, amo_rows, sheet_rows, status, error)
@@ -240,5 +252,6 @@ async function getLastSync() {
 
 module.exports = {
   upsertFbInsights, upsertAmoLeads, upsertGeneralSales, upsertAmoSales, logSync,
+  deleteAmoLeadsByIds, deleteAmoSalesByIds,
   getFbInsightsInRange, getAmoLeadsInRange, getGeneralSalesInRange, getAmoSalesInRange, getAdsFlagsByIds, getLastSync,
 };

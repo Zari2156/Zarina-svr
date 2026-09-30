@@ -58,6 +58,7 @@ async function fetchAmoSalesByContractDate(since, until) {
   const untilTs = Math.floor(new Date(until + 'T23:59:59Z').getTime() / 1000);
 
   const leads = [];
+  const excludedIds = []; // сделки не из отдела Online — их убираем из базы
   let page = 1;
   const limit = 250;
 
@@ -69,10 +70,14 @@ async function fetchAmoSalesByContractDate(since, until) {
       page,
       limit,
     };
-    statusIds.forEach((s, i) => { params[`filter[status_id][${i}]`] = s; });
-    if (AMO_FIELD_DEPARTMENT && AMO_FIELD_DEPARTMENT !== '0') {
-      params[`filter[custom_fields_values][${AMO_FIELD_DEPARTMENT}][0]`] = 'Online';
-    }
+    // Фильтр по этапам — в формате, который описан в документации amoCRM API v4.
+    statusIds.forEach((s, i) => {
+      params[`filter[statuses][${i}][pipeline_id]`] = AMO_PIPELINE_ID;
+      params[`filter[statuses][${i}][status_id]`] = s;
+    });
+    // Фильтр по доп. полю "Отдел" в запросе НЕ ставим: amoCRM отвечает 400
+    // "Invalid filter for current account" (фильтр по доп. полям недоступен для аккаунта).
+    // Отдел "Online" проверяется ниже, уже на нашей стороне.
 
     const resp = await axios.get(url, {
       params,
@@ -96,13 +101,18 @@ async function fetchAmoSalesByContractDate(since, until) {
       const contractDateRaw = getField(lead, AMO_FIELD_CONTRACT_DATE);
       const contractDate = contractDateRaw ? Number(contractDateRaw) : null;
 
+      // Страховка: берём только сделки на нужных этапах.
+      if (statusIds.length && !statusIds.map(String).includes(String(lead.status_id))) continue;
+
+      // Отдел проверяем на нашей стороне (фильтр по доп. полю в запросе amoCRM не принимает).
+      // Сделки не из Online запоминаем, чтобы удалить их из базы, если раньше они были Online.
+      if (AMO_FIELD_DEPARTMENT && AMO_FIELD_DEPARTMENT !== '0') {
+        const dep = String(department || '').trim().toLowerCase();
+        if (dep !== 'online') { excludedIds.push(lead.id); continue; }
+      }
+
       // Дату заключения договора проверяем ЗДЕСЬ, на своей стороне — не в запросе к amoCRM.
       if (!contractDate || contractDate < sinceTs || contractDate > untilTs) continue;
-
-      if (AMO_FIELD_DEPARTMENT && AMO_FIELD_DEPARTMENT !== '0') {
-        const dep = (department || '').toLowerCase();
-        if (dep !== 'online') continue;
-      }
 
       leads.push({
         id: lead.id,
@@ -119,7 +129,9 @@ async function fetchAmoSalesByContractDate(since, until) {
     page++;
   }
 
-  return leads.filter((l) => l.segment !== null);
+  const result = leads.filter((l) => l.segment !== null);
+  result.excludedIds = excludedIds;
+  return result;
 }
 
 async function fetchAmoLeads(since, until) {
@@ -145,6 +157,7 @@ async function fetchAmoLeads(since, until) {
   const untilTs = Math.floor(new Date(until + 'T23:59:59Z').getTime() / 1000);
 
   const leads = [];
+  const excludedIds = []; // сделки не из отдела Online — их убираем из базы
   let page = 1;
   const limit = 250;
 
@@ -158,11 +171,8 @@ async function fetchAmoLeads(since, until) {
       page,
       limit,
     };
-    // Сужаем поиск ещё на этапе запроса к amoCRM — фильтр по отделу "Online" прямо тут,
-    // а не отбрасываем лишнее уже после того, как всё скачали. Меньше данных — быстрее ответ.
-    if (AMO_FIELD_DEPARTMENT && AMO_FIELD_DEPARTMENT !== '0') {
-      params[`filter[custom_fields_values][${AMO_FIELD_DEPARTMENT}][0]`] = 'Online';
-    }
+    // Фильтр по доп. полю "Отдел" в запросе НЕ ставим: amoCRM отвечает 400
+    // "Invalid filter for current account". Отдел "Online" проверяется ниже, на нашей стороне.
 
     const resp = await axios.get(url, {
       params,
@@ -186,8 +196,8 @@ async function fetchAmoLeads(since, until) {
 
       // Если поле "Отдел" настроено — учитываем только Online, остальные пропускаем
       if (AMO_FIELD_DEPARTMENT && AMO_FIELD_DEPARTMENT !== '0') {
-        const dep = (department || '').toLowerCase();
-        if (dep !== 'online') continue;
+        const dep = String(department || '').trim().toLowerCase();
+        if (dep !== 'online') { excludedIds.push(lead.id); continue; }
       }
 
       leads.push({
@@ -224,6 +234,7 @@ async function fetchAmoLeads(since, until) {
     page++;
   }
 
+  leads.excludedIds = excludedIds;
   return leads;
 }
 

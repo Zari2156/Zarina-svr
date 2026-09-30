@@ -66,6 +66,13 @@ async function runSync(sinceIn, untilIn) {
     const sinceTs = Math.floor(new Date(since + 'T00:00:00Z').getTime() / 1000);
     const untilTs = Math.floor(new Date(until + 'T23:59:59Z').getTime() / 1000);
     await db.upsertAmoSales(amoSales.map((s) => ({ ...s, contract_date: s.contract_date || null, synced_at: new Date().toISOString() })));
+    // Сделки, которые сейчас не в отделе Online, убираем из базы — чтобы переведённые в офлайн не считались.
+    const offlineIds = [...new Set([...(amoLeads.excludedIds || []), ...(amoSales.excludedIds || [])])];
+    const removedLeads = await db.deleteAmoLeadsByIds(offlineIds);
+    const removedSales = await db.deleteAmoSalesByIds(offlineIds);
+    if (removedLeads || removedSales) {
+      console.log(`[sync] Убрано из базы (больше не Online): сделок ${removedLeads}, продаж ${removedSales}`);
+    }
     await db.logSync({ since, until, fbRows: fbRows.length, amoRows: amoLeads.length, sheetRows: amoSales.length, status: 'ok' });
     console.log(`[sync] Запись в БД: за ${((Date.now() - t0) / 1000).toFixed(1)}с`);
 
