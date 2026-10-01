@@ -1,6 +1,6 @@
 const { fetchFacebookInsights, fetchAdStatuses } = require('./facebookClient');
 const { fetchAmoLeads, fetchAmoSalesByContractDate, fetchPipelineStatuses, fetchReachedQualIds } = require('./amoClient');
-const { toTs, segmentByTags } = require('./rules');
+const { toTs, segmentByTags, segmentByClass } = require('./rules');
 const db = require('./db');
 const { buildRecommendations } = require('./recommendations');
 
@@ -239,15 +239,21 @@ async function buildJoinedReport(since, until) {
   const nish = buildSegmentReport('nish', fbRows, leads.filter((l) => segOf(l) === 'nish'), sales.filter((x) => segOf(x) === 'nish'), isQual, rate, adStatuses);
   const ent = buildSegmentReport('ent', fbRows, leads.filter((l) => segOf(l) === 'ent'), sales.filter((x) => segOf(x) === 'ent'), isQual, rate, adStatuses);
 
-  // --- Нижний блок: все онлайн-сделки и продажи (любые источники) ---
-  const allQual = leads.filter(isQual).length;
-  const general = {
-    leads: leads.length,
-    qualified: allQual,
-    percentQualified: leads.length > 0 ? (allQual / leads.length) * 100 : null,
-    sales: sales.length,
-    revenue: sumPrice(sales),
+  // --- Нижний блок "Общие": все онлайн-сделки и продажи (любые источники),
+  //     НИШ/ЕНТ — по полю "Класс обучения" (3–6 -> НИШ, 9–11 -> ЕНТ) ---
+  const generalFor = (seg) => {
+    const segLeads = leads.filter((l) => segmentByClass(l.klass) === seg);
+    const segSales = sales.filter((x) => segmentByClass(x.klass) === seg);
+    const q = segLeads.filter(isQual).length;
+    return {
+      leads: segLeads.length,
+      qualified: q,
+      percentQualified: segLeads.length > 0 ? (q / segLeads.length) * 100 : null,
+      sales: segSales.length,
+      revenue: sumPrice(segSales),
+    };
   };
+  const general = { nish: generalFor('nish'), ent: generalFor('ent') };
 
   return { since, until, nish, ent, general, lastSync: await db.getLastSync() };
 }

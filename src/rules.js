@@ -26,4 +26,15 @@ function segmentByTags(tagsStr) {
   return null;
 }
 
-module.exports = { toTs, tagList, hasAnyTag, segmentByTags };
+// Для блока "Общие" НИШ/ЕНТ определяется по полю "Класс обучения":
+// 3, 4, 5, 6 класс -> НИШ; 9, 10, 11 класс -> ЕНТ.
+const CLASS_NISH = (process.env.CLASS_NISH || '3,4,5,6').split(',').map((x) => Number(x.trim()));
+const CLASS_ENT = (process.env.CLASS_ENT || '9,10,11').split(',').map((x) => Number(x.trim()));
+function segmentByClass(klass) {
+  const k = parseInt(String(klass == null ? '' : klass).replace(/[^0-9]/g, ''), 10);
+  if (CLASS_NISH.includes(k)) return 'nish';
+  if (CLASS_ENT.includes(k)) return 'ent';
+  return null;
+}
+
+module.exports = { toTs, tagList, hasAnyTag, segmentByTags, segmentByClass };

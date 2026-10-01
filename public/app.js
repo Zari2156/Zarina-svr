@@ -41,8 +41,7 @@ function render() {
   renderTotals(seg.totals);
   renderTable(seg.rows);
   renderRecommendations(seg.recommendations);
-  renderGeneralSalesBlock(currentReport.general);
-  renderChart(seg.rows);
+  renderGeneralSalesBlock(currentReport.general ? currentReport.general[currentSegment] : null);
 }
 
 function renderTotals(t) {
@@ -116,6 +115,8 @@ function renderRecommendations(recs) {
 }
 
 function renderGeneralSalesBlock(block) {
+  const hint = document.getElementById('generalClassHint');
+  if (hint) hint.textContent = currentSegment === 'ent' ? 'ЕНТ — 9–11 кл.' : 'НИШ — 3–6 кл.';
   if (!block) return;
   document.getElementById('generalSalesBlock').innerHTML = [
     { label: 'Лиды (все онлайн)', value: fmt(block.leads) },
