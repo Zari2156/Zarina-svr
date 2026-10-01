@@ -1,9 +1,14 @@
 const axios = require('axios');
 
+// НИШ / ЕНТ определяется по названию КАМПАНИИ: "НИШ"/"NISH" или "ЕНТ"/"ENT" отдельным словом
+// (так, чтобы, например, "PARENTS" или "CONTENT" не считались ЕНТ).
+function hasWord(name, words) {
+  return words.some((w) => new RegExp(`(^|[^A-ZА-ЯЁ0-9])${w}([^A-ZА-ЯЁ0-9]|$)`).test(name));
+}
 function classifyCampaignSegment(campaignName) {
   const name = (campaignName || '').toUpperCase();
-  if (name.includes('НИШ') || name.includes('NISH')) return 'nish';
-  if (name.includes('ЕНТ') || name.includes('ENT')) return 'ent';
+  if (hasWord(name, ['НИШ', 'NISH'])) return 'nish';
+  if (hasWord(name, ['ЕНТ', 'ENT'])) return 'ent';
   return null;
 }
 

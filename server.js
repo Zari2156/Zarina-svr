@@ -212,5 +212,9 @@ app.listen(PORT, HOST, () => {
       runQuickSyncToday().catch(() => {});
     }, { timezone: 'Asia/Almaty' });
     console.log(`[cron] Обновление сегодняшнего дня: "${quickSchedule}" (каждые 15 минут)`);
+
+    // Сразу после запуска — одно обновление сегодняшнего дня (статусы объявлений, свежие данные),
+    // чтобы не ждать ближайших 15 минут.
+    setTimeout(() => { runQuickSyncToday().catch(() => {}); }, 5000);
   }
 });

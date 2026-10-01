@@ -63,23 +63,28 @@ function renderTotals(t) {
   `).join('');
 }
 
-// Статус показа из Facebook (как в колонке "Статус показа" в Ads Manager)
-const STATUS_LABELS = {
-  ACTIVE: 'Активно', PAUSED: 'Выключено', CAMPAIGN_PAUSED: 'Кампания выключена',
-  ADSET_PAUSED: 'Группа выключена', DISAPPROVED: 'Отклонено', PENDING_REVIEW: 'На проверке',
-  WITH_ISSUES: 'Есть ошибки', IN_PROCESS: 'Обрабатывается', ARCHIVED: 'В архиве', DELETED: 'Удалено',
-  PENDING_BILLING_INFO: 'Нужна оплата', PREAPPROVED: 'Одобрено',
-};
+// Статус показа — как в Ads Manager: "Активно" или "Выкл."
+// (отдельно подписываем только особые случаи: отклонено, на проверке, ошибки).
+const SPECIAL_STATUS = { DISAPPROVED: 'Отклонено', PENDING_REVIEW: 'На проверке', WITH_ISSUES: 'Ошибки', IN_PROCESS: 'На проверке' };
+function statusLabel(st) {
+  if (!st) return '—';
+  if (st === 'ACTIVE') return 'Активно';
+  return SPECIAL_STATUS[st] || 'Выкл.';
+}
 function statusCell(st) {
-  if (!st) return '<span class="status status--off">—</span>';
   const cls = st === 'ACTIVE' ? 'status--on' : 'status--off';
-  return `<span class="status ${cls}">${STATUS_LABELS[st] || st}</span>`;
+  return `<span class="status ${cls}">${statusLabel(st)}</span>`;
 }
 
 function renderTable(rows) {
   const sortBy = document.getElementById('sortSelect').value;
   const onlyActive = document.getElementById('statusFilter').value === 'active';
   const visible = onlyActive ? rows.filter(r => r.delivery_status === 'ACTIVE') : rows;
+  if (onlyActive && rows.length > 0 && rows.every(r => !r.delivery_status)) {
+    document.getElementById('adsTableBody').innerHTML =
+      '<tr><td colspan="12" style="color:var(--text-muted);padding:16px">Статусы показа ещё загружаются из Facebook — обновите страницу через пару минут.</td></tr>';
+    return;
+  }
   const sorted = [...visible].sort((a, b) => (b[sortBy] || 0) - (a[sortBy] || 0));
   document.getElementById('adsTableBody').innerHTML = sorted.map(r => `
     <tr>

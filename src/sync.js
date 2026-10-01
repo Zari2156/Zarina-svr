@@ -182,7 +182,8 @@ function buildSegmentReport(segment, fbRows, segLeads, segSales, isQual, rate, a
     const revenue = sumPrice(adSales);
     const sales = adSales.length;
     return {
-      delivery_status: adStatuses[fb.ad_id] || null,
+      // Есть статусы из Facebook: нет объявления в списке (удалено/в архиве) -> считаем выключенным.
+      delivery_status: Object.keys(adStatuses).length ? (adStatuses[fb.ad_id] || 'ARCHIVED') : null,
       ad_id: fb.ad_id, ad_name: fb.ad_name, adset_name: fb.adset_name, campaign_name: fb.campaign_name,
       spend: fb.spend, impressions: fb.impressions,
       ctr: fb.impressions > 0 ? (fb.clicks / fb.impressions) * 100 : 0,

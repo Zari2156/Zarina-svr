@@ -287,10 +287,8 @@ tr:last-child td { border-bottom: none; }
 .block-title { font-size: 15px; font-weight: 600; color: var(--text-muted, #8B94A7); margin: 0 0 10px; }
 .content--single { grid-template-columns: 1fr !important; }
 
-/* Статус показа объявления */
-.status { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; white-space: nowrap; }
-.status::before { content: ""; width: 8px; height: 8px; border-radius: 50%; }
-.status--on::before { background: #22C55E; }
+/* Статус показа объявления: просто текст, как в Ads Manager */
+.status { font-size: 13px; white-space: nowrap; }
+.status--on { color: #22C55E; font-weight: 600; }
 .status--off { color: var(--text-muted, #8B94A7); }
-.status--off::before { background: #6B7280; }
 .sort-controls select + label { margin-left: 12px; }
