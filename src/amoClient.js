@@ -33,7 +33,7 @@ function classifySegment(klass, nishClasses, entClasses) {
 // такие фильтры amoCRM обрабатывает гораздо медленнее и это, похоже, и вызывало таймауты.
 // Сделок с финальным успешным статусом объективно немного по сравнению со всей базой, поэтому
 // дату заключения договора теперь просто проверяем НА СВОЕЙ СТОРОНЕ, уже после получения ответа.
-async function fetchAmoSalesByContractDate(since, until) {
+async function fetchAmoSalesByContractDate(since, until, opts = {}) {
   const {
     AMO_SUBDOMAIN, AMO_ACCESS_TOKEN, AMO_PIPELINE_ID,
     AMO_STATUS_SUCCESS, AMO_STATUS_FULL_PAYMENT, AMO_STATUS_WON,
@@ -71,6 +71,11 @@ async function fetchAmoSalesByContractDate(since, until) {
       page,
       limit,
     };
+    // Быстрое обновление "сегодня": берём только сделки, изменённые с этого момента.
+    if (opts.updatedFrom) {
+      params['filter[updated_at][from]'] = opts.updatedFrom;
+      params['filter[updated_at][to]'] = Math.floor(Date.now() / 1000);
+    }
     // Фильтр по этапам — в формате, который описан в документации amoCRM API v4.
     statusIds.forEach((s, i) => {
       params[`filter[statuses][${i}][pipeline_id]`] = AMO_PIPELINE_ID;
@@ -136,7 +141,7 @@ async function fetchAmoSalesByContractDate(since, until) {
   return leads;
 }
 
-async function fetchAmoLeads(since, until) {
+async function fetchAmoLeads(since, until, opts = {}) {
   const {
     AMO_SUBDOMAIN, AMO_ACCESS_TOKEN, AMO_PIPELINE_ID,
     AMO_STATUS_QUALIFIED, AMO_STATUS_SUCCESS, AMO_STATUS_FULL_PAYMENT, AMO_STATUS_WON,
@@ -167,12 +172,18 @@ async function fetchAmoLeads(since, until) {
     const url = `https://${AMO_SUBDOMAIN}.amocrm.ru/api/v4/leads`;
     const params = {
       'filter[pipeline_id]': AMO_PIPELINE_ID,
-      'filter[created_at][from]': sinceTs,
-      'filter[created_at][to]': untilTs,
       with: 'custom_fields_values,tags',
       page,
       limit,
     };
+    if (opts.updatedFrom) {
+      // Быстрое обновление "сегодня": все сделки, ИЗМЕНЁННЫЕ сегодня (новые, сменившие этап, отдел и т.д.)
+      params['filter[updated_at][from]'] = opts.updatedFrom;
+      params['filter[updated_at][to]'] = Math.floor(Date.now() / 1000);
+    } else {
+      params['filter[created_at][from]'] = sinceTs;
+      params['filter[created_at][to]'] = untilTs;
+    }
     // Фильтр по доп. полю "Отдел" в запросе НЕ ставим: amoCRM отвечает 400
     // "Invalid filter for current account". Отдел "Online" проверяется ниже, на нашей стороне.
 

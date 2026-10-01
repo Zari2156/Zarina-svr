@@ -7,7 +7,7 @@ const session = require('express-session');
 const bcrypt = require('bcryptjs');
 const rateLimit = require('express-rate-limit');
 
-const { runSync, buildJoinedReport } = require('./src/sync');
+const { runSync, runQuickSyncToday, buildJoinedReport } = require('./src/sync');
 const { fetchAmoMeta, fetchLeadDebug } = require('./src/amoClient');
 
 const app = express();
@@ -202,8 +202,15 @@ app.listen(PORT, HOST, () => {
     const schedule = process.env.CRON_SCHEDULE || '0 6 * * *';
     cron.schedule(schedule, () => {
       console.log('[cron] Запуск плановой синхронизации');
-      runSync().catch(() => {});
+      runSync(undefined, undefined, { wait: true, label: 'ночная' }).catch(() => {});
     }, { timezone: 'Asia/Almaty' });
     console.log(`[cron] Автосинхронизация включена: "${schedule}" (Asia/Almaty)`);
+
+    // Фактические данные за сегодня: каждые 15 минут подтягиваем сегодняшний день.
+    const quickSchedule = process.env.QUICK_SYNC_SCHEDULE || '*/15 * * * *';
+    cron.schedule(quickSchedule, () => {
+      runQuickSyncToday().catch(() => {});
+    }, { timezone: 'Asia/Almaty' });
+    console.log(`[cron] Обновление сегодняшнего дня: "${quickSchedule}" (каждые 15 минут)`);
   }
 });

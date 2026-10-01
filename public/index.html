@@ -45,6 +45,11 @@
       <div class="panel__head">
         <h2>Объявления</h2>
         <div class="sort-controls">
+          <label for="statusFilter">Показывать</label>
+          <select id="statusFilter">
+            <option value="all">Все объявления</option>
+            <option value="active">Только активные</option>
+          </select>
           <label for="sortSelect">Сортировать по</label>
           <select id="sortSelect">
             <option value="roas">ROAS</option>
@@ -61,7 +66,7 @@
         <table id="adsTable">
           <thead>
             <tr>
-              <th>Объявление</th><th>Кампания</th><th>Расход</th><th>Лиды</th>
+              <th>Объявление</th><th>Статус показа</th><th>Кампания</th><th>Расход</th><th>Лиды</th>
               <th>CPL</th><th>Квалы</th><th>CPQL</th><th>Продажи</th><th>CAC</th><th>Выручка</th><th>ROAS</th>
             </tr>
           </thead>

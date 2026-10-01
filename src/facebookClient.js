@@ -77,4 +77,21 @@ async function fetchFacebookInsights(since, until) {
   return rows;
 }
 
-module.exports = { fetchFacebookInsights };
+// Статус показа каждого объявления, как в колонке "Статус показа" в Ads Manager
+// (effective_status: ACTIVE = "Активно", PAUSED = выключено и т.д.).
+async function fetchAdStatuses() {
+  const { FB_ACCESS_TOKEN, FB_AD_ACCOUNT_ID, FB_API_VERSION } = process.env;
+  let url = `https://graph.facebook.com/${FB_API_VERSION}/${FB_AD_ACCOUNT_ID}/ads`;
+  let params = { fields: 'id,effective_status', limit: 500, access_token: FB_ACCESS_TOKEN };
+  const map = {};
+  while (url) {
+    const { data } = await axios.get(url, { params, validateStatus: () => true, timeout: 60000 });
+    if (data.error) throw new Error(`Facebook API error: ${data.error.message}`);
+    for (const ad of data.data || []) map[ad.id] = ad.effective_status;
+    url = data.paging && data.paging.next ? data.paging.next : null;
+    params = undefined;
+  }
+  return map;
+}
+
+module.exports = { fetchFacebookInsights, fetchAdStatuses };

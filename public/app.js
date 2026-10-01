@@ -63,12 +63,28 @@ function renderTotals(t) {
   `).join('');
 }
 
+// Статус показа из Facebook (как в колонке "Статус показа" в Ads Manager)
+const STATUS_LABELS = {
+  ACTIVE: 'Активно', PAUSED: 'Выключено', CAMPAIGN_PAUSED: 'Кампания выключена',
+  ADSET_PAUSED: 'Группа выключена', DISAPPROVED: 'Отклонено', PENDING_REVIEW: 'На проверке',
+  WITH_ISSUES: 'Есть ошибки', IN_PROCESS: 'Обрабатывается', ARCHIVED: 'В архиве', DELETED: 'Удалено',
+  PENDING_BILLING_INFO: 'Нужна оплата', PREAPPROVED: 'Одобрено',
+};
+function statusCell(st) {
+  if (!st) return '<span class="status status--off">—</span>';
+  const cls = st === 'ACTIVE' ? 'status--on' : 'status--off';
+  return `<span class="status ${cls}">${STATUS_LABELS[st] || st}</span>`;
+}
+
 function renderTable(rows) {
   const sortBy = document.getElementById('sortSelect').value;
-  const sorted = [...rows].sort((a, b) => (b[sortBy] || 0) - (a[sortBy] || 0));
+  const onlyActive = document.getElementById('statusFilter').value === 'active';
+  const visible = onlyActive ? rows.filter(r => r.delivery_status === 'ACTIVE') : rows;
+  const sorted = [...visible].sort((a, b) => (b[sortBy] || 0) - (a[sortBy] || 0));
   document.getElementById('adsTableBody').innerHTML = sorted.map(r => `
     <tr>
       <td class="name-cell">${r.ad_name || r.ad_id}<span class="campaign">${r.adset_name || ''}</span></td>
+      <td>${statusCell(r.delivery_status)}</td>
       <td class="name-cell">${r.campaign_name || '—'}</td>
       <td>${fmt(r.spend)}</td><td>${fmt(r.leads)}</td><td>${fmt(r.cpl)}</td>
       <td>${fmt(r.qualified)}</td><td>${fmt(r.cpql)}</td>
@@ -166,6 +182,7 @@ document.getElementById('syncBtn').addEventListener('click', async () => {
 
 document.getElementById('applyDateBtn').addEventListener('click', loadDashboard);
 document.getElementById('sortSelect').addEventListener('change', () => { if (currentReport) render(); });
+document.getElementById('statusFilter').addEventListener('change', () => { if (currentReport) render(); });
 
 initDefaultDates();
 loadDashboard();

@@ -1,4 +1,4 @@
-const { fetchFacebookInsights } = require('./facebookClient');
+const { fetchFacebookInsights, fetchAdStatuses } = require('./facebookClient');
 const { fetchAmoLeads, fetchAmoSalesByContractDate, fetchPipelineStatuses, fetchReachedQualIds } = require('./amoClient');
 const { toTs, segmentByTags } = require('./rules');
 const db = require('./db');
@@ -41,9 +41,25 @@ function defaultRangeIfMissing(since, until) {
 
 let syncInProgress = false; // защита от одновременного запуска нескольких синхронизаций
 
-async function runSync(sinceIn, untilIn) {
+// Сегодняшняя дата по Алматы в формате "2026-09-30"
+function todayAlmaty() {
+  return new Date().toLocaleDateString('en-CA', { timeZone: process.env.TZ_NAME || 'Asia/Almaty' });
+}
+
+// opts.updatedFrom — быстрый режим: брать из amoCRM только сделки, изменённые с этого момента
+// opts.salesSince — с какой даты договора сохранять продажи (для быстрого режима — широкий период)
+// opts.wait — если идёт другая синхронизация, дождаться её (для ночного запуска)
+// opts.quiet — если идёт другая синхронизация, тихо пропустить (для обновления "сегодня" каждые 15 мин)
+async function runSync(sinceIn, untilIn, opts = {}) {
   const { since, until } = defaultRangeIfMissing(sinceIn, untilIn);
 
+  if (syncInProgress && opts.wait) {
+    console.log(`[sync] Жду окончания текущей синхронизации, затем (${since} — ${until})`);
+    while (syncInProgress) await new Promise((r) => setTimeout(r, 5000));
+  }
+  if (syncInProgress && opts.quiet) {
+    return { skipped: true };
+  }
   if (syncInProgress) {
     console.log(`[sync] Пропущено (${since} — ${until}) — уже идёт другая синхронизация`);
     throw new Error('Синхронизация уже выполняется, подождите её завершения (обычно 1-3 минуты)');
@@ -54,21 +70,22 @@ async function runSync(sinceIn, untilIn) {
     // Раньше три запроса шли параллельно (Promise.all), и в логах при зависании было не видно,
     // какой именно из них виснет. Теперь идут по очереди, с логом времени каждого шага —
     // если синк опять зависнет, в логах будет точно видно, на каком шаге.
-    console.log(`[sync] Старт (${since} — ${until})`);
+    const label = opts.label ? ` [${opts.label}]` : '';
+    console.log(`[sync] Старт${label} (${since} — ${until})`);
 
     let t0 = Date.now();
     const fbRows = await fetchFacebookInsights(since, until);
     console.log(`[sync] Facebook: ${fbRows.length} строк за ${((Date.now() - t0) / 1000).toFixed(1)}с`);
 
     t0 = Date.now();
-    const amoLeads = await fetchAmoLeads(since, until);
+    const amoLeads = await fetchAmoLeads(since, until, { updatedFrom: opts.updatedFrom });
     console.log(`[sync] amoCRM (сделки): ${amoLeads.length} строк за ${((Date.now() - t0) / 1000).toFixed(1)}с`);
 
     // Источник выручки — НЕ Google Таблица (убрали её полностью, третий источник только тормозил),
     // а сама amoCRM: сделки, дошедшие до успешной оплаты, отфильтрованные по дате ЗАКЛЮЧЕНИЯ
     // ДОГОВОРА. Остаётся всего два источника — Facebook + amoCRM.
     t0 = Date.now();
-    const amoSales = await fetchAmoSalesByContractDate(since, until);
+    const amoSales = await fetchAmoSalesByContractDate(opts.salesSince || since, until, { updatedFrom: opts.updatedFrom });
     console.log(`[sync] amoCRM (продажи): ${amoSales.length} строк за ${((Date.now() - t0) / 1000).toFixed(1)}с`);
 
     // Этапы воронки и история: какие сделки доходили до квалификации (для подсчёта квалов как в amoCRM).
@@ -81,7 +98,7 @@ async function runSync(sinceIn, untilIn) {
       const qualStatus = statuses.find((st) => Number(st.id) === Number(process.env.AMO_STATUS_QUALIFIED));
       console.log(`[sync] Этап квала: ${qualStatus ? qualStatus.name : 'НЕ НАЙДЕН (проверьте AMO_STATUS_QUALIFIED)'}; этапов, считающихся квалом: ${qualIds.length}`);
       if (qualIds.length) {
-        const reached = await fetchReachedQualIds(toTs(since), qualIds);
+        const reached = await fetchReachedQualIds(opts.updatedFrom || toTs(since), qualIds);
         if (reached) {
           await db.addReachedQual(reached);
           console.log(`[sync] История квалов: ${reached.length} сделок за ${((Date.now() - t0) / 1000).toFixed(1)}с`);
@@ -89,6 +106,16 @@ async function runSync(sinceIn, untilIn) {
       }
     } catch (e) {
       console.warn('[sync] Этапы/история квалов не получены:', e.message);
+    }
+
+    // Статус показа объявлений (Активно / выключено) — для колонки "Статус" в таблице.
+    t0 = Date.now();
+    try {
+      const adStatuses = await fetchAdStatuses();
+      await db.setKv('ad_statuses', adStatuses);
+      console.log(`[sync] Статусы объявлений: ${Object.keys(adStatuses).length} за ${((Date.now() - t0) / 1000).toFixed(1)}с`);
+    } catch (e) {
+      console.warn('[sync] Статусы объявлений не получены:', e.message);
     }
 
     t0 = Date.now();
@@ -105,7 +132,7 @@ async function runSync(sinceIn, untilIn) {
     await db.logSync({ since, until, fbRows: fbRows.length, amoRows: amoLeads.length, sheetRows: amoSales.length, status: 'ok' });
     console.log(`[sync] Запись в БД: за ${((Date.now() - t0) / 1000).toFixed(1)}с`);
 
-    console.log(`[sync] OK (${since} — ${until}): FB ${fbRows.length}, amoCRM сделки ${amoLeads.length}, amoCRM продажи ${amoSales.length}`);
+    console.log(`[sync] OK${label} (${since} — ${until}): FB ${fbRows.length}, amoCRM сделки ${amoLeads.length}, amoCRM продажи ${amoSales.length}`);
     return { since, until, fbRows: fbRows.length, amoRows: amoLeads.length, sheetRows: amoSales.length };
   } catch (err) {
     await db.logSync({ since, until, status: 'error', error: err.message }).catch(() => {});
@@ -114,6 +141,13 @@ async function runSync(sinceIn, untilIn) {
   } finally {
     syncInProgress = false;
   }
+}
+
+// Быстрое обновление сегодняшнего дня (запускается каждые 15 минут):
+// расход Facebook за сегодня + все сделки amoCRM, изменённые сегодня (новые лиды, квалы, оплаты, смена отдела).
+async function runQuickSyncToday() {
+  const today = todayAlmaty();
+  return runSync(today, today, { updatedFrom: toTs(today), salesSince: '2025-01-01', quiet: true, label: 'сегодня' });
 }
 
 // ===================== ОТЧЁТ ДЛЯ ДАШБОРДА =====================
@@ -132,7 +166,7 @@ function sumPrice(list) {
   return list.reduce((sum, x) => sum + (x.price || 0), 0);
 }
 
-function buildSegmentReport(segment, fbRows, segLeads, segSales, isQual, rate) {
+function buildSegmentReport(segment, fbRows, segLeads, segSales, isQual, rate, adStatuses = {}) {
   const fbSeg = fbRows.filter((r) => r.segment === segment);
 
   // --- Таблица по объявлениям ---
@@ -148,6 +182,7 @@ function buildSegmentReport(segment, fbRows, segLeads, segSales, isQual, rate) {
     const revenue = sumPrice(adSales);
     const sales = adSales.length;
     return {
+      delivery_status: adStatuses[fb.ad_id] || null,
       ad_id: fb.ad_id, ad_name: fb.ad_name, adset_name: fb.adset_name, campaign_name: fb.campaign_name,
       spend: fb.spend, impressions: fb.impressions,
       ctr: fb.impressions > 0 ? (fb.clicks / fb.impressions) * 100 : 0,
@@ -177,7 +212,10 @@ function buildSegmentReport(segment, fbRows, segLeads, segSales, isQual, rate) {
   totals.percentQualified = totals.leads > 0 ? (qualified / totals.leads) * 100 : null;
   totals.roas = spend > 0 ? totals.revenue / (spend * rate) : null;
 
-  return { segment, rows, totals, recommendations: buildRecommendations(rows) };
+  // Советы ассистента — только по активным объявлениям (по выключенным советовать нечего).
+  const haveStatuses = Object.keys(adStatuses).length > 0;
+  const recRows = haveStatuses ? rows.filter((r) => r.delivery_status === 'ACTIVE') : rows;
+  return { segment, rows, totals, recommendations: buildRecommendations(recRows) };
 }
 
 async function buildJoinedReport(since, until) {
@@ -195,9 +233,10 @@ async function buildJoinedReport(since, until) {
   // Курс для ROAS, если расход Facebook в другой валюте, чем выручка (например, $ -> ₸).
   const rate = Number(process.env.SPEND_TO_REVENUE_RATE || 1) || 1;
 
+  const adStatuses = (await db.getKv('ad_statuses')) || {};
   const segOf = (x) => segmentByTags(x.tags);
-  const nish = buildSegmentReport('nish', fbRows, leads.filter((l) => segOf(l) === 'nish'), sales.filter((x) => segOf(x) === 'nish'), isQual, rate);
-  const ent = buildSegmentReport('ent', fbRows, leads.filter((l) => segOf(l) === 'ent'), sales.filter((x) => segOf(x) === 'ent'), isQual, rate);
+  const nish = buildSegmentReport('nish', fbRows, leads.filter((l) => segOf(l) === 'nish'), sales.filter((x) => segOf(x) === 'nish'), isQual, rate, adStatuses);
+  const ent = buildSegmentReport('ent', fbRows, leads.filter((l) => segOf(l) === 'ent'), sales.filter((x) => segOf(x) === 'ent'), isQual, rate, adStatuses);
 
   // --- Нижний блок: все онлайн-сделки и продажи (любые источники) ---
   const allQual = leads.filter(isQual).length;
@@ -212,4 +251,4 @@ async function buildJoinedReport(since, until) {
   return { since, until, nish, ent, general, lastSync: await db.getLastSync() };
 }
 
-module.exports = { runSync, buildJoinedReport };
+module.exports = { runSync, runQuickSyncToday, buildJoinedReport };
