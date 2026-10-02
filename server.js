@@ -7,7 +7,7 @@ const session = require('express-session');
 const bcrypt = require('bcryptjs');
 const rateLimit = require('express-rate-limit');
 
-const { runSync, runQuickSyncToday, buildJoinedReport } = require('./src/sync');
+const { runSync, runQuickSyncToday, backfillLostHistoryOnce, buildJoinedReport } = require('./src/sync');
 const { fetchAmoMeta, fetchLeadDebug } = require('./src/amoClient');
 
 const app = express();
@@ -215,6 +215,6 @@ app.listen(PORT, HOST, () => {
 
     // Сразу после запуска — одно обновление сегодняшнего дня (статусы объявлений, свежие данные),
     // чтобы не ждать ближайших 15 минут.
-    setTimeout(() => { runQuickSyncToday().catch(() => {}); }, 5000);
+    setTimeout(() => { backfillLostHistoryOnce().catch(() => {}).then(() => runQuickSyncToday().catch(() => {})); }, 5000);
   }
 });

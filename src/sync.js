@@ -1,5 +1,5 @@
 const { fetchFacebookInsights, fetchAdStatuses } = require('./facebookClient');
-const { fetchAmoLeads, fetchAmoSalesByContractDate, fetchPipelineStatuses, fetchReachedQualIds } = require('./amoClient');
+const { fetchAmoLeads, fetchAmoSalesByContractDate, fetchPipelineStatuses, fetchLostFromStatuses } = require('./amoClient');
 const { toTs, segmentByTags, segmentByClass } = require('./rules');
 const db = require('./db');
 const { buildRecommendations } = require('./recommendations');
@@ -97,12 +97,11 @@ async function runSync(sinceIn, untilIn, opts = {}) {
       const qualIds = qualifyingStatusIds(statuses);
       const qualStatus = statuses.find((st) => Number(st.id) === Number(process.env.AMO_STATUS_QUALIFIED));
       console.log(`[sync] Этап квала: ${qualStatus ? qualStatus.name : 'НЕ НАЙДЕН (проверьте AMO_STATUS_QUALIFIED)'}; этапов, считающихся квалом: ${qualIds.length}`);
-      if (qualIds.length) {
-        const reached = await fetchReachedQualIds(opts.updatedFrom || toTs(since), qualIds);
-        if (reached) {
-          await db.addReachedQual(reached);
-          console.log(`[sync] История квалов: ${reached.length} сделок за ${((Date.now() - t0) / 1000).toFixed(1)}с`);
-        }
+      // История закрытий: с какого этапа закрыли сделки "не реализовано" (для подсчёта квалов как в воронке amoCRM).
+      const lostFrom = await fetchLostFromStatuses(opts.updatedFrom || toTs(since));
+      if (lostFrom) {
+        await db.saveLostFrom(lostFrom);
+        console.log(`[sync] История закрытий: ${Object.keys(lostFrom).length} сделок за ${((Date.now() - t0) / 1000).toFixed(1)}с`);
       }
     } catch (e) {
       console.warn('[sync] Этапы/история квалов не получены:', e.message);
@@ -138,6 +137,31 @@ async function runSync(sinceIn, untilIn, opts = {}) {
     await db.logSync({ since, until, status: 'error', error: err.message }).catch(() => {});
     console.error('[sync] ОШИБКА:', err.message);
     throw err;
+  } finally {
+    syncInProgress = false;
+  }
+}
+
+// Один раз после установки: загрузить историю закрытий для всех сделок, которые уже есть в базе.
+async function backfillLostHistoryOnce() {
+  if (await db.getKv('lost_from_backfilled')) return;
+  const minTs = await db.getMinLeadCreatedAt();
+  if (!minTs) return;
+  while (syncInProgress) await new Promise((r) => setTimeout(r, 5000));
+  syncInProgress = true;
+  try {
+    console.log('[sync] Загружаю историю закрытых сделок (один раз, несколько минут)...');
+    const t0 = Date.now();
+    const statuses = await fetchPipelineStatuses();
+    await db.setKv('pipeline_statuses', statuses);
+    const lostFrom = await fetchLostFromStatuses(minTs);
+    if (lostFrom) {
+      await db.saveLostFrom(lostFrom);
+      await db.setKv('lost_from_backfilled', true);
+      console.log(`[sync] История закрытых сделок загружена: ${Object.keys(lostFrom).length} за ${((Date.now() - t0) / 1000).toFixed(0)}с`);
+    }
+  } catch (e) {
+    console.warn('[sync] История закрытых сделок не загружена:', e.message);
   } finally {
     syncInProgress = false;
   }
@@ -228,8 +252,15 @@ async function buildJoinedReport(since, until) {
 
   const statuses = (await db.getKv('pipeline_statuses')) || [];
   const qualStatusSet = new Set(qualifyingStatusIds(statuses));
-  const reached = await db.getReachedQualSet();
-  const isQual = (l) => qualStatusSet.has(Number(l.status_id)) || reached.has(Number(l.id)) || Number(l.is_qualified) === 1;
+  // Квал — точно как в воронке amoCRM ("Анализ продаж"):
+  //  - открытая или успешная сделка: сейчас на этапе "Квалификация пройдена" или дальше;
+  //  - закрытая "не реализовано": её закрыли С этапа "Квалификация пройдена" или дальше.
+  const lostFrom = await db.getLostFromMap();
+  const isQual = (l) => {
+    const st = Number(l.status_id);
+    if (st === 143) return qualStatusSet.has(Number(lostFrom.get(Number(l.id))));
+    return qualStatusSet.has(st);
+  };
 
   // Курс для ROAS, если расход Facebook в другой валюте, чем выручка (например, $ -> ₸).
   const rate = Number(process.env.SPEND_TO_REVENUE_RATE || 1) || 1;
@@ -258,4 +289,4 @@ async function buildJoinedReport(since, until) {
   return { since, until, nish, ent, general, lastSync: await db.getLastSync() };
 }
 
-module.exports = { runSync, runQuickSyncToday, buildJoinedReport };
+module.exports = { runSync, runQuickSyncToday, backfillLostHistoryOnce, buildJoinedReport };

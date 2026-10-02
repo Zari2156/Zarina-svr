@@ -90,6 +90,12 @@ CREATE TABLE IF NOT EXISTS amo_reached_qual (
   id INTEGER PRIMARY KEY
 );
 
+-- Закрытые сделки (Закрыто и не реализовано): с какого этапа их закрыли.
+CREATE TABLE IF NOT EXISTS amo_lost_from (
+  id INTEGER PRIMARY KEY,
+  status_id INTEGER
+);
+
 -- Простые настройки/справочники (например, этапы воронки).
 CREATE TABLE IF NOT EXISTS kv (
   k TEXT PRIMARY KEY,
@@ -217,6 +223,21 @@ async function addReachedQual(ids) {
 async function getReachedQualSet() {
   return new Set(db.prepare('SELECT id FROM amo_reached_qual').all().map((r) => r.id));
 }
+async function saveLostFrom(map) {
+  const entries = Object.entries(map || {});
+  if (!entries.length) return;
+  const stmt = db.prepare('INSERT INTO amo_lost_from (id, status_id) VALUES (?, ?) ON CONFLICT(id) DO UPDATE SET status_id = excluded.status_id');
+  db.transaction((list) => { for (const [id, st] of list) stmt.run(Number(id), st); })(entries);
+}
+async function getLostFromMap() {
+  const m = new Map();
+  for (const r of db.prepare('SELECT id, status_id FROM amo_lost_from').all()) m.set(r.id, r.status_id);
+  return m;
+}
+async function getMinLeadCreatedAt() {
+  const r = db.prepare('SELECT MIN(created_at) AS m FROM amo_leads').get();
+  return r ? r.m : null;
+}
 async function setKv(k, value) {
   db.prepare('INSERT INTO kv (k, v) VALUES (?, ?) ON CONFLICT(k) DO UPDATE SET v = excluded.v').run(k, JSON.stringify(value));
 }
@@ -285,5 +306,6 @@ module.exports = {
   upsertFbInsights, upsertAmoLeads, upsertGeneralSales, upsertAmoSales, logSync,
   deleteAmoLeadsByIds, deleteAmoSalesByIds,
   addReachedQual, getReachedQualSet, setKv, getKv, getAmoLeadsCreatedInRange,
+  saveLostFrom, getLostFromMap, getMinLeadCreatedAt,
   getFbInsightsInRange, getAmoLeadsInRange, getGeneralSalesInRange, getAmoSalesInRange, getAdsFlagsByIds, getLastSync,
 };

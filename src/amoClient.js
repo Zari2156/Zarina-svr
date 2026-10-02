@@ -475,4 +475,49 @@ async function fetchReachedQualIds(sinceTs, qualStatusIds) {
   return [...ids];
 }
 
-module.exports = { fetchPipelineStatuses, fetchReachedQualIds, fetchAmoLeads, fetchAmoLeadsByIds, fetchAmoSalesByContractDate, fetchStatusChangeDates, fetchAmoMeta, fetchLeadDebug };
+// Для сделок "Закрыто и не реализовано" (143): с какого этапа их закрыли.
+// Воронка amoCRM считает закрытую сделку прошедшей все этапы ДО того, с которого её закрыли.
+// Возвращает { id сделки: id этапа перед закрытием } или null, если amoCRM не отдал историю.
+async function fetchLostFromStatuses(sinceTs) {
+  const { AMO_SUBDOMAIN, AMO_ACCESS_TOKEN, AMO_PIPELINE_ID } = process.env;
+  const result = {};
+  const seenAt = {};
+  let page = 1;
+  while (true) {
+    const params = {
+      'filter[type]': 'lead_status_changed',
+      'filter[entity]': 'lead',
+      'filter[created_at][from]': sinceTs,
+      'filter[value_after][leads_statuses][0][pipeline_id]': AMO_PIPELINE_ID,
+      'filter[value_after][leads_statuses][0][status_id]': 143,
+      page,
+      limit: 100,
+    };
+    const resp = await axios.get(`https://${AMO_SUBDOMAIN}.amocrm.ru/api/v4/events`, {
+      params, headers: { Authorization: `Bearer ${AMO_ACCESS_TOKEN}` }, validateStatus: () => true, timeout: 60000,
+    });
+    if (resp.status === 204) break;
+    if (resp.status >= 400) {
+      console.warn(`[amoClient] История закрытий недоступна (${resp.status}): ${JSON.stringify(resp.data).slice(0, 200)}`);
+      return null;
+    }
+    const events = (resp.data._embedded && resp.data._embedded.events) || [];
+    if (events.length === 0) break;
+    for (const ev of events) {
+      const before = (ev.value_before || []).find((v) => v && v.lead_status);
+      if (!before) continue;
+      const id = Number(ev.entity_id);
+      // Если сделку закрывали несколько раз — берём самое последнее закрытие.
+      if (!seenAt[id] || ev.created_at > seenAt[id]) {
+        seenAt[id] = ev.created_at;
+        result[id] = Number(before.lead_status.id);
+      }
+    }
+    if (page % 20 === 0) console.log(`[amoClient] История закрытий: страница ${page}`);
+    if (events.length < 100) break;
+    page++;
+  }
+  return result;
+}
+
+module.exports = { fetchLostFromStatuses, fetchPipelineStatuses, fetchReachedQualIds, fetchAmoLeads, fetchAmoLeadsByIds, fetchAmoSalesByContractDate, fetchStatusChangeDates, fetchAmoMeta, fetchLeadDebug };
